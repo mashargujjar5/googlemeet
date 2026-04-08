@@ -195,6 +195,11 @@ export default function MeetingPage() {
   const [copied, setCopied] = useState(false);
   const [socketError, setSocketError] = useState(null);
 
+  // New states for screen share and private chat
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [screenStream, setScreenStream] = useState(null);
+  const [chatTarget, setChatTarget] = useState('all');
+
   const socketRef = useRef(null);
   const localStreamRef = useRef(null);
   const peersRef = useRef({});
@@ -463,9 +468,66 @@ export default function MeetingPage() {
       meetingId: meetingCode,
       message: newMessage.trim(),
       senderName: userName,
-      senderId: user?._id || user?.id
+      senderId: user?._id || user?.id,
+      receiverSocketId: chatTarget === 'all' ? null : chatTarget
     });
     setNewMessage('');
+  };
+
+  const stopScreenShare = useCallback(() => {
+    if (screenStream) {
+      screenStream.getTracks().forEach(t => t.stop());
+    }
+    setScreenStream(null);
+    setIsScreenSharing(false);
+
+    // Revert to camera track
+    const camVideoTrack = localStreamRef.current?.getVideoTracks()[0];
+    Object.values(peersRef.current).forEach(pc => {
+      const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+      if (sender && camVideoTrack) {
+        sender.replaceTrack(camVideoTrack).catch(err => console.error("Error reverting track:", err));
+      }
+    });
+
+    // Update local tile to show camera again
+    if (!camOn) {
+      setParticipants(prev => prev.map(p => p.isMe ? { ...p, videoOff: true } : p));
+    }
+    setLocalStream(localStreamRef.current);
+  }, [screenStream, camOn]);
+
+  const toggleScreenShare = async () => {
+    if (isScreenSharing) {
+      stopScreenShare();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      setScreenStream(stream);
+      setIsScreenSharing(true);
+
+      const screenVideoTrack = stream.getVideoTracks()[0];
+
+      // Stop sharing when the browser default "Stop sharing" button is clicked
+      screenVideoTrack.onended = () => {
+        stopScreenShare();
+      };
+
+      // Replace video track for all existing peers
+      Object.values(peersRef.current).forEach(pc => {
+        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+        if (sender && screenVideoTrack) {
+          sender.replaceTrack(screenVideoTrack).catch(err => console.error("Error replacing track:", err));
+        }
+      });
+
+      // Update local tile visibility and stream
+      setParticipants(prev => prev.map(p => p.isMe ? { ...p, videoOff: false } : p));
+      setLocalStream(stream); // Temporary override of the local tile video stream
+    } catch (err) {
+      console.error('Error sharing screen:', err);
+    }
   };
 
   const handleLeave = () => navigate('/post', { state: { meetingCode, duration } });
@@ -639,17 +701,19 @@ export default function MeetingPage() {
                     const isMe = msg.senderName === userName;
                     return (
                       <div key={idx} style={{ display: 'flex', flexDirection: 'column', alignItems: isMe ? 'flex-end' : 'flex-start' }}>
-                        {!isMe && (
-                          <span style={{ fontSize: 11, color: '#9aa0a6', marginBottom: 3, paddingLeft: 4 }}>{msg.senderName}</span>
-                        )}
+                        <span style={{ fontSize: 11, color: msg.isPrivate ? '#fbbc04' : '#9aa0a6', marginBottom: 3, padding: isMe ? '0 4px 0 0' : '0 0 0 4px' }}>
+                          {isMe ? (msg.isPrivate ? 'To: Private' : 'You') : msg.senderName} {msg.isPrivate && '(Private)'}
+                        </span>
                         <div style={{
-                          background: isMe ? 'linear-gradient(135deg, #1a73e8, #4285f4)' : '#3c4043',
+                          background: msg.isPrivate 
+                            ? (isMe ? 'linear-gradient(135deg, #b06000, #f29900)' : '#4d3300')
+                            : (isMe ? 'linear-gradient(135deg, #1a73e8, #4285f4)' : '#3c4043'),
                           padding: '10px 14px',
                           borderRadius: isMe ? '18px 18px 4px 18px' : '4px 18px 18px 18px',
                           maxWidth: '82%', boxShadow: '0 1px 4px rgba(0,0,0,0.3)'
                         }}>
                           <p style={{ color: '#e8eaed', fontSize: 14, lineHeight: 1.45, margin: 0 }}>{msg.message}</p>
-                          <p style={{ color: isMe ? 'rgba(255,255,255,0.55)' : '#9aa0a6', fontSize: 10, marginTop: 4, textAlign: 'right', margin: '4px 0 0' }}>
+                          <p style={{ color: msg.isPrivate ? 'rgba(255,255,255,0.7)' : (isMe ? 'rgba(255,255,255,0.55)' : '#9aa0a6'), fontSize: 10, marginTop: 4, textAlign: 'right', margin: '4px 0 0' }}>
                             {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                           </p>
                         </div>
@@ -661,6 +725,21 @@ export default function MeetingPage() {
 
                 {/* Chat Input */}
                 <div style={{ padding: 12, borderTop: '1px solid #3c4043' }}>
+                  <div style={{ marginBottom: 8, padding: '0 4px' }}>
+                    <select
+                      value={chatTarget}
+                      onChange={e => setChatTarget(e.target.value)}
+                      style={{
+                        background: '#3c4043', color: '#e8eaed', border: '1px solid #5f6368',
+                        padding: '4px 8px', borderRadius: 6, fontSize: 12, width: '100%', outline: 'none'
+                      }}
+                    >
+                      <option value="all">Everyone</option>
+                      {participants.filter(p => !p.isMe).map(p => (
+                        <option key={p.socketId} value={p.socketId}>{p.name}</option>
+                      ))}
+                    </select>
+                  </div>
                   <div style={{
                     display: 'flex', gap: 8, alignItems: 'center',
                     background: '#3c4043', borderRadius: 24, padding: '8px 8px 8px 16px'
@@ -722,8 +801,10 @@ export default function MeetingPage() {
             onClick={toggleCam} tooltip={camOn ? 'Turn off camera' : 'Turn on camera'}
           />
           <ControlBtn
-            active={true} activeColor="#3c4043"
-            icon={<Monitor size={22} />} tooltip="Present now"
+            active={isScreenSharing} activeColor="#8ab4f8" inactiveColor="#3c4043"
+            icon={<Monitor size={22} color={isScreenSharing ? '#202124' : 'white'} />} 
+            onClick={toggleScreenShare} 
+            tooltip={isScreenSharing ? "Stop presenting" : "Present now"}
           />
           <ControlBtn
             active={handRaised} activeColor="#fbbc04" inactiveColor="#3c4043"

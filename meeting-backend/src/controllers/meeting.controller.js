@@ -29,7 +29,7 @@ exports.getMyMeetings = async (req, res) => {
 
 exports.getMeetingInfo = async (req, res) => {
   try {
-    const meeting = await Meeting.findOne({ meetingId: req.params.meetingId });
+    const meeting = await Meeting.findOne({ meetingId: req.params.meetingCode });
     if (!meeting) return res.status(404).json({ success: false, message: "Meeting not found" });
     res.status(200).json({ success: true, data: meeting });
   } catch (error) {
@@ -40,9 +40,17 @@ exports.getMeetingInfo = async (req, res) => {
 exports.joinMeeting = async (req, res) => {
   try {
     const { name } = req.body;
-    const meeting = await Meeting.findOne({ meetingId: req.params.meetingId });
+    let meeting = await Meeting.findOne({ meetingId: req.params.meetingCode });
     
-    if (!meeting) return res.status(404).json({ success: false, message: "Meeting not found" });
+    if (!meeting) {
+      // Auto-create to allow joining any code
+      meeting = await Meeting.create({
+        meetingId: req.params.meetingCode,
+        title: `Meeting ${req.params.meetingCode}`,
+        host: req.user ? req.user._id : null
+      });
+    }
+
     if (meeting.status === 'ended') return res.status(400).json({ success: false, message: "Meeting has ended" });
 
     // Validation logic for joining (e.g. check if user is blocked, etc.)
