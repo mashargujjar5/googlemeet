@@ -46,7 +46,14 @@ export default function PreJoinPage() {
 
     return () => {
       if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(track => track.stop());
+        localStreamRef.current.getTracks().forEach(track => {
+          track.stop();
+          console.log(`Stopped track: ${track.kind}`);
+        });
+        localStreamRef.current = null;
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
       }
     };
   }, []);
@@ -95,11 +102,13 @@ export default function PreJoinPage() {
       const response = await meetingService.joinMeeting(meetingCode, name.trim());
 
       if (response.success || response.data) {
+        const isHost = response.data?.host === user?._id || response.data?.host === user?.id;
         navigate(`/meeting/${meetingCode}`, { 
           state: { 
             userName: name.trim(), 
             micOn, 
             camOn, 
+            isHost,
             status: response.data?.status || 'active' 
           } 
         });

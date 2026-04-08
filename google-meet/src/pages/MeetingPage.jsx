@@ -4,7 +4,7 @@ import { io } from 'socket.io-client';
 import {
   Mic, MicOff, Video, VideoOff,
   Monitor, Users, MessageSquare, PhoneOff,
-  Shield, Hand, LayoutGrid, Send, X, Copy, Check
+  Shield, Hand, LayoutGrid, Send, X, Copy, Check, Settings
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { SOCKET_URL } from '../config';
@@ -20,8 +20,102 @@ const fmtTime = (s) => {
   return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
 };
 
+/* ─── JoinRequestModal ────────────────────────────────── */
+function JoinRequestModal({ requests, onAccept, onReject }) {
+  if (!requests.length) return null;
+  const req = requests[0]; // Show one at a time
+
+  return (
+    <div style={{
+      position: 'absolute', top: 80, left: 24, zIndex: 1000,
+      background: '#2d2e30', borderRadius: '12px', padding: '16px',
+      boxShadow: '0 8px 32px rgba(0,0,0,0.5)', border: '1px solid #3c4043',
+      width: '300px', display: 'flex', flexDirection: 'column', gap: '12px',
+      animation: 'slideIn 0.3s ease-out'
+    }}>
+      <style>{`
+        @keyframes slideIn { from { transform: translateX(-20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+      `}</style>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <div style={{
+          width: 40, height: 40, borderRadius: '50%', background: '#1a73e8',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', color: 'white'
+        }}>{getInitials(req.name)}</div>
+        <div style={{ flex: 1 }}>
+          <p style={{ color: '#e8eaed', fontSize: '14px', margin: 0, fontWeight: 500 }}>{req.name}</p>
+          <p style={{ color: '#9aa0a6', fontSize: '12px', margin: 0 }}>wants to join this call</p>
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: '8px' }}>
+        <button
+          onClick={() => onReject(req.socketId)}
+          style={{
+            flex: 1, padding: '8px', borderRadius: '6px', border: 'none',
+            background: 'transparent', color: '#8ab4f8', cursor: 'pointer', fontSize: '13px'
+          }}
+        >Deny</button>
+        <button
+          onClick={() => onAccept(req.socketId)}
+          style={{
+            flex: 1, padding: '8px', borderRadius: '6px', border: 'none',
+            background: '#1a73e8', color: 'white', cursor: 'pointer', fontSize: '13px'
+          }}
+        >Admit</button>
+      </div>
+    </div>
+  );
+}
+
+/* ─── SettingsModal ──────────────────────────────────── */
+function SettingsModal({ isOpen, onClose, audioOutputs, selectedOutput, onSelectOutput }) {
+  if (!isOpen) return null;
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000,
+      backdropFilter: 'blur(4px)'
+    }}>
+      <div style={{
+        background: '#2d2e30', borderRadius: '24px', width: '90%', maxWidth: '400px',
+        padding: '24px', boxShadow: '0 24px 48px rgba(0,0,0,0.4)', border: '1px solid #3c4043'
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+          <h2 style={{ color: '#e8eaed', fontSize: '20px', margin: 0 }}>Audio Settings</h2>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#9aa0a6', cursor: 'pointer' }}><X /></button>
+        </div>
+
+        <div style={{ marginBottom: '24px' }}>
+          <label style={{ color: '#9aa0a6', fontSize: '13px', display: 'block', marginBottom: '8px' }}>Speakers / Headphones</label>
+          <select
+            value={selectedOutput}
+            onChange={(e) => onSelectOutput(e.target.value)}
+            style={{
+              width: '100%', padding: '12px', background: '#3c4043', border: '1px solid #5f6368',
+              borderRadius: '8px', color: '#e8eaed', outline: 'none'
+            }}
+          >
+            {audioOutputs.map(device => (
+              <option key={device.deviceId} value={device.deviceId}>{device.label || `Speaker ${device.deviceId.slice(0,5)}`}</option>
+            ))}
+          </select>
+          <p style={{ color: '#5f6368', fontSize: '11px', marginTop: '6px' }}>* Browser support for output switching may vary.</p>
+        </div>
+
+        <button
+          onClick={onClose}
+          style={{
+            width: '100%', padding: '12px', background: '#1a73e8', color: 'white',
+            borderRadius: '12px', border: 'none', cursor: 'pointer', fontWeight: 500
+          }}
+        >Done</button>
+      </div>
+    </div>
+  );
+}
+
 /* ─── ParticipantTile (separate component so hooks are stable) ─── */
-function ParticipantTile({ participant, localStream, streamsRef }) {
+function ParticipantTile({ participant, localStream, streamsRef, selectedOutput }) {
   const videoRef = useRef(null);
 
   useEffect(() => {
@@ -33,13 +127,19 @@ function ParticipantTile({ participant, localStream, streamsRef }) {
         if (localStream) videoRef.current.srcObject = localStream;
       } else {
         const stream = streamsRef.current[participant.socketId];
-        if (stream) videoRef.current.srcObject = stream;
+        if (stream) {
+          videoRef.current.srcObject = stream;
+          // Apply audio output if supported
+          if (videoRef.current.setSinkId && selectedOutput) {
+            videoRef.current.setSinkId(selectedOutput).catch(e => console.error("Error setting sinkId for remote track:", e));
+          }
+        }
       }
     };
 
     const t = setTimeout(attach, 80);
     return () => clearTimeout(t);
-  }, [participant.isMe, participant.socketId, participant.videoOff, localStream]);
+  }, [participant.isMe, participant.socketId, participant.videoOff, localStream, selectedOutput]);
 
   return (
     <div style={{
@@ -200,6 +300,16 @@ export default function MeetingPage() {
   const [screenStream, setScreenStream] = useState(null);
   const [chatTarget, setChatTarget] = useState('all');
 
+  // New Admission states
+  const [joinStatus, setJoinStatus] = useState(initialData.isHost ? 'joined' : 'initial');
+  const [isHost, setIsHost] = useState(initialData.isHost || false);
+  const [joinRequests, setJoinRequests] = useState([]);
+
+  // Audio Output states
+  const [audioOutputs, setAudioOutputs] = useState([]);
+  const [selectedOutput, setSelectedOutput] = useState('default');
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
   const socketRef = useRef(null);
   const localStreamRef = useRef(null);
   const peersRef = useRef({});
@@ -306,33 +416,73 @@ export default function MeetingPage() {
         if (vTrack) vTrack.enabled = hasCam;
         if (aTrack) aTrack.enabled = hasMic;
         setLocalStream(stream);
-        // Update local tile: video might be available now
         setParticipants(prev => prev.map(p =>
           p.isMe ? { ...p, videoOff: !hasCam || !vTrack } : p
         ));
       } else {
-        // No media at all — show avatar tile
         setParticipants(prev => prev.map(p =>
           p.isMe ? { ...p, videoOff: true, muted: true } : p
         ));
       }
 
-      // ── Join room ──
+      // Check audio output devices
+      if (navigator.mediaDevices.enumerateDevices) {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        setAudioOutputs(devices.filter(d => d.kind === 'audiooutput'));
+      }
+
+      // ── Join or Request ──
+      if (initialData.isHost) {
+        socket.emit('join-room', {
+          meetingId: meetingCode,
+          name: userName,
+          userId: user?._id || user?.id,
+          avatar: user?.avatar || '',
+          isHost: true,
+          isCameraOff: !hasCam || !stream?.getVideoTracks().length,
+          isMuted: !hasMic
+        });
+      } else {
+        setJoinStatus('requesting');
+        socket.emit('request-join', {
+          meetingId: meetingCode,
+          name: userName,
+          userId: user?._id || user?.id,
+          avatar: user?.avatar || ''
+        });
+      }
+    };
+
+    startStream();
+
+    // ── Admission Listeners ──
+    socket.on('waiting-for-host', () => setJoinStatus('waiting'));
+    socket.on('join-approved', () => {
+      setJoinStatus('joined');
+      const hasCam = !!(initialData.camOn ?? true);
+      const hasMic = !!(initialData.micOn ?? true);
       socket.emit('join-room', {
         meetingId: meetingCode,
         name: userName,
         userId: user?._id || user?.id,
         avatar: user?.avatar || '',
-        isHost: initialData.isHost || false,
-        isCameraOff: !hasCam || !stream?.getVideoTracks().length,
+        isHost: false,
+        isCameraOff: !hasCam || !localStreamRef.current?.getVideoTracks().length,
         isMuted: !hasMic
       });
-    };
+    });
+    socket.on('join-denied', ({ message }) => {
+      setJoinStatus('denied');
+      setSocketError(message);
+    });
 
-    startStream();
+    socket.on('incoming-join-request', (req) => {
+      setJoinRequests(prev => [...prev, req]);
+    });
 
     // ── Room joined (existing participants) ──
-    socket.on('room-joined', ({ participants: existing = [], chatHistory = [], participantId }) => {
+    socket.on('room-joined', ({ participants: existing = [], chatHistory = [], participantId, isHost: actualHost }) => {
+      if (actualHost) setIsHost(true);
       // Build full participant list, marking isMe by socket id
       const mapped = existing.map(p => ({
         ...p,
@@ -435,11 +585,33 @@ export default function MeetingPage() {
     return () => {
       clearInterval(timer);
       socket.disconnect();
-      localStreamRef.current?.getTracks().forEach(t => t.stop());
+      
+      // KILL ALL TRACKS (Camera, Mic, Screen)
+      const stopAllTracks = (stream) => {
+        if (stream && stream.getTracks) {
+          stream.getTracks().forEach(t => {
+            t.stop();
+            console.log(`Explicitly stopped track: ${t.kind}`);
+          });
+        }
+      };
+
+      stopAllTracks(localStreamRef.current);
+      stopAllTracks(screenStream); // Ensure screen share stops too
+      
+      localStreamRef.current = null;
+      
+      // Clear video sources
+      const videos = document.querySelectorAll('video');
+      videos.forEach(v => {
+        v.srcObject = null;
+        v.load();
+      });
+
       Object.values(peersRef.current).forEach(pc => pc.close());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [meetingCode]);
+  }, [meetingCode, screenStream]); // Include screenStream in deps to ensure cleanup has access to latest ref
 
   // ── Controls ────────────────────────────────────────
   const toggleMic = () => {
@@ -530,11 +702,40 @@ export default function MeetingPage() {
     }
   };
 
-  const handleLeave = () => navigate('/post', { state: { meetingCode, duration } });
+  const handleLeave = () => {
+    // Explicitly call cleanup logic if navigate doesn't trigger it fast enough
+    if (localStreamRef.current) localStreamRef.current.getTracks().forEach(t => t.stop());
+    if (screenStream) screenStream.getTracks().forEach(t => t.stop());
+    navigate('/post', { state: { meetingCode, duration } });
+  };
 
   const togglePanel = (p) => {
     setPanel(prev => prev === p ? null : p);
     if (p === 'chat') setUnread(0);
+  };
+
+  const handleAcceptRequest = (socketId) => {
+    socketRef.current?.emit('accept-join-request', { meetingId: meetingCode, socketId });
+    setJoinRequests(prev => prev.filter(r => r.socketId !== socketId));
+  };
+
+  const handleRejectRequest = (socketId) => {
+    socketRef.current?.emit('reject-join-request', { meetingId: meetingCode, socketId });
+    setJoinRequests(prev => prev.filter(r => r.socketId !== socketId));
+  };
+
+  const handleSelectOutput = async (deviceId) => {
+    setSelectedOutput(deviceId);
+    const videos = document.querySelectorAll('video');
+    for (const video of videos) {
+      if (video.setSinkId) {
+        try {
+          await video.setSinkId(deviceId);
+        } catch (err) {
+          console.error("Error setting sink ID:", err);
+        }
+      }
+    }
   };
 
   const copyCode = () => {
@@ -602,8 +803,8 @@ export default function MeetingPage() {
         <div style={{ flex: 1, padding: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', position: 'relative' }}>
           {socketError ? (
             <div style={{ textAlign: 'center', background: 'rgba(234,67,53,0.1)', padding: '24px 32px', borderRadius: 16, border: '1px solid rgba(234,67,53,0.3)' }}>
-              <div style={{ fontSize: 40, marginBottom: 12 }}>⚠️</div>
-              <h3 style={{ color: '#e8eaed', marginBottom: 8 }}>Connection failed</h3>
+              <div style={{ fontSize: 40, marginBottom: 12 }}>{joinStatus === 'denied' ? '🛑' : '⚠️'}</div>
+              <h3 style={{ color: '#e8eaed', marginBottom: 8 }}>{joinStatus === 'denied' ? 'Entry Denied' : 'Connection failed'}</h3>
               <p style={{ color: '#ea4335', fontSize: 16 }}>{socketError}</p>
               <button 
                 onClick={() => navigate('/')} 
@@ -611,6 +812,13 @@ export default function MeetingPage() {
               >
                 Go back to Home
               </button>
+            </div>
+          ) : joinStatus === 'waiting' || joinStatus === 'requesting' ? (
+            <div style={{ textAlign: 'center', background: '#2d2e30', padding: '40px', borderRadius: '24px', maxWidth: '400px', boxShadow: '0 12px 40px rgba(0,0,0,0.3)' }}>
+              <div className="loader" style={{ width: '60px', height: '60px', border: '4px solid #3c4043', borderTop: '4px solid #1a73e8', borderRadius: '50%', margin: '0 auto 24px', animation: 'spin 1s linear infinite' }} />
+              <h2 style={{ color: '#e8eaed', fontSize: '24px', fontWeight: '400', marginBottom: '12px' }}>Asking to join...</h2>
+              <p style={{ color: '#9aa0a6', fontSize: '15px' }}>You'll join the call when someone lets you in.</p>
+              <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
             </div>
           ) : participants.length === 0 ? (
             <div style={{ textAlign: 'center', color: '#5f6368' }}>
@@ -629,10 +837,29 @@ export default function MeetingPage() {
                   participant={p}
                   localStream={localStream}
                   streamsRef={streamsRef}
+                  selectedOutput={selectedOutput}
                 />
               ))}
             </div>
           )}
+
+          {/* Admission UI for Host */}
+          {isHost && (
+            <JoinRequestModal 
+              requests={joinRequests} 
+              onAccept={handleAcceptRequest} 
+              onReject={handleRejectRequest} 
+            />
+          )}
+
+          {/* Settings Modal */}
+          <SettingsModal 
+            isOpen={isSettingsOpen} 
+            onClose={() => setIsSettingsOpen(false)}
+            audioOutputs={audioOutputs}
+            selectedOutput={selectedOutput}
+            onSelectOutput={handleSelectOutput}
+          />
         </div>
 
         {/* ── Side Panel ── */}
@@ -811,6 +1038,12 @@ export default function MeetingPage() {
             icon={<Hand size={22} />}
             onClick={() => setHandRaised(h => !h)}
             tooltip={handRaised ? 'Lower hand' : 'Raise hand'}
+          />
+          <ControlBtn
+            active={isSettingsOpen} activeColor="#1a73e8" inactiveColor="#3c4043"
+            icon={<Settings size={22} />}
+            onClick={() => setIsSettingsOpen(true)}
+            tooltip="Settings"
           />
 
           {/* Leave */}

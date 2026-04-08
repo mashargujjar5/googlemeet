@@ -1,31 +1,94 @@
 const Meeting = require('../models/meeting.model');
+
 // In-memory chat per meeting (resets on server restart)
 const chatHistories = {};
+// Tracking join requests and approved participants
+const pendingRequests = {}; // meetingId -> [ {socketId, name, userId, avatar} ]
+const approvedParticipants = {}; // meetingId -> Set(userId or socketId)
 
 module.exports = (io) => {
   io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
 
+    // ─── Request to Join (for Guest/Non-host) ─────────────────────
+    socket.on('request-join', async ({ meetingId, name, userId, avatar }) => {
+      try {
+        console.log(`[request-join] ${name} (${socket.id}) requesting to join ${meetingId}`);
+        const meeting = await Meeting.findOne({ meetingId });
+        
+        if (!meeting) {
+          return socket.emit('error', { message: 'Meeting not found' });
+        }
+
+        // If user is the host, they should be able to join directly
+        if (meeting.host && String(meeting.host) === String(userId)) {
+          return socket.emit('join-approved', { meetingId });
+        }
+
+        if (!pendingRequests[meetingId]) pendingRequests[meetingId] = [];
+        pendingRequests[meetingId].push({ socketId: socket.id, name, userId, avatar });
+
+        // Broadcast request to everyone currently in the room
+        io.to(meetingId).emit('incoming-join-request', {
+          socketId: socket.id,
+          name,
+          userId,
+          avatar
+        });
+
+        socket.emit('waiting-for-host', { message: 'The host will let you in soon.' });
+      } catch (err) {
+        console.error('Request join error:', err);
+      }
+    });
+
+    // ─── Host Decision (Admit/Deny) ──────────────────────────────
+    socket.on('accept-join-request', ({ meetingId, socketId }) => {
+      console.log(`[accept-join-request] Admitting ${socketId} to ${meetingId}`);
+      if (!approvedParticipants[meetingId]) approvedParticipants[meetingId] = new Set();
+      approvedParticipants[meetingId].add(socketId);
+
+      // Notify the specific requester
+      io.to(socketId).emit('join-approved', { meetingId });
+      
+      // Remove from pending
+      if (pendingRequests[meetingId]) {
+        pendingRequests[meetingId] = pendingRequests[meetingId].filter(r => r.socketId !== socketId);
+      }
+    });
+
+    socket.on('reject-join-request', ({ meetingId, socketId }) => {
+      console.log(`[reject-join-request] Denying ${socketId} to ${meetingId}`);
+      io.to(socketId).emit('join-denied', { message: 'The host has denied your request to join.' });
+      
+      // Remove from pending
+      if (pendingRequests[meetingId]) {
+        pendingRequests[meetingId] = pendingRequests[meetingId].filter(r => r.socketId !== socketId);
+      }
+    });
+
     // ─── Join Room ──────────────────────────────────────────────
     socket.on('join-room', async ({ meetingId, name, userId, avatar, isHost, isCameraOff, isMuted }) => {
       try {
+        let meeting = await Meeting.findOne({ meetingId });
+        
+        if (!meeting) {
+          return socket.emit('error', { message: 'Meeting not found. Please check your code.' });
+        }
+
+        const isActualHost = (meeting.host && String(meeting.host) === String(userId)) || isHost;
+        const isApproved = approvedParticipants[meetingId] && approvedParticipants[meetingId].has(socket.id);
+
+        if (!isActualHost && !isApproved) {
+          console.warn(`[join-room] Unauthorized join attempt by ${name} to ${meetingId}`);
+          return socket.emit('error', { message: 'You need host approval to join this meeting.' });
+        }
+        
+        // Basic join logic
         socket.join(meetingId);
         console.log(`[join-room] ${name} joined ${meetingId} (cam:${!isCameraOff} mic:${!isMuted})`);
 
-        let meeting = await Meeting.findOne({ meetingId });
-        if (!meeting) {
-          // Auto-create to allow joining any code from URL directly
-          meeting = await Meeting.create({
-            meetingId,
-            title: `Meeting ${meetingId}`,
-            // If userId is missing or invalid, don't set host to avoid CastErrors
-            host: userId && String(userId).length === 24 ? userId : undefined
-          });
-        }
-
-        // Remove any stale entry for this user (reconnect scenario)
         meeting.participants = meeting.participants.filter(p => p.socketId !== socket.id);
-
         const participant = {
           socketId: socket.id,
           name: name || 'Guest',
@@ -34,18 +97,15 @@ module.exports = (io) => {
           isMuted: !!isMuted,
           isCameraOff: !!isCameraOff
         };
-
         meeting.participants.push(participant);
 
-        if ((isHost || (meeting.host && String(meeting.host) === String(userId))) && meeting.status !== 'ended') {
+        if ((isHost || isActualHost) && meeting.status !== 'ended') {
           meeting.status = 'active';
         }
         await meeting.save();
 
-        // Init chat history bucket
         if (!chatHistories[meetingId]) chatHistories[meetingId] = [];
 
-        // Tell everyone else about the new participant
         socket.to(meetingId).emit('participant-joined', {
           socketId: socket.id,
           name: participant.name,
@@ -54,7 +114,6 @@ module.exports = (io) => {
           isCameraOff: participant.isCameraOff
         });
 
-        // Send current state to the new user
         socket.emit('room-joined', {
           meetingId,
           participantId: socket.id,
@@ -67,7 +126,8 @@ module.exports = (io) => {
             isMe: p.socketId === socket.id
           })),
           chatHistory: chatHistories[meetingId] || [],
-          status: meeting.status
+          status: meeting.status,
+          isHost: isActualHost
         });
       } catch (err) {
         console.error('Socket join exception:', err);
@@ -101,11 +161,9 @@ module.exports = (io) => {
       if (!chatHistories[meetingId]) chatHistories[meetingId] = [];
 
       if (receiverSocketId) {
-        // Private message: emit only to the specific receiver and the sender themselves
         io.to(receiverSocketId).emit('new-message', msg);
         socket.emit('new-message', msg);
       } else {
-        // Public message: save in history and broadcast to room
         chatHistories[meetingId].push(msg);
         io.to(meetingId).emit('new-message', msg);
       }
@@ -113,7 +171,6 @@ module.exports = (io) => {
 
     // ─── Media Toggles ──────────────────────────────────────────
     socket.on('toggle-mute', async ({ meetingId, isMuted }) => {
-      // Persist to DB
       await Meeting.findOneAndUpdate(
         { meetingId, 'participants.socketId': socket.id },
         { $set: { 'participants.$.isMuted': isMuted } }
@@ -139,6 +196,10 @@ module.exports = (io) => {
             meeting.participants = meeting.participants.filter(p => p.socketId !== socket.id);
             await meeting.save();
             socket.to(roomId).emit('participant-left', { socketId: socket.id });
+
+            if (approvedParticipants[roomId]) {
+              approvedParticipants[roomId].delete(socket.id);
+            }
           }
         } catch (err) {
           console.error('Error on disconnect cleanup:', err);

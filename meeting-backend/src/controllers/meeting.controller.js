@@ -43,12 +43,7 @@ exports.joinMeeting = async (req, res) => {
     let meeting = await Meeting.findOne({ meetingId: req.params.meetingCode });
     
     if (!meeting) {
-      // Auto-create to allow joining any code
-      meeting = await Meeting.create({
-        meetingId: req.params.meetingCode,
-        title: `Meeting ${req.params.meetingCode}`,
-        host: req.user ? req.user._id : null
-      });
+      return res.status(404).json({ success: false, message: "Meeting not found. Please check your code or create a new meeting." });
     }
 
     if (meeting.status === 'ended') return res.status(400).json({ success: false, message: "Meeting has ended" });
