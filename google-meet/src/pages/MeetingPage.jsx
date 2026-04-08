@@ -1,0 +1,770 @@
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
+import { io } from 'socket.io-client';
+import {
+  Mic, MicOff, Video, VideoOff,
+  Monitor, Users, MessageSquare, PhoneOff,
+  Shield, Hand, LayoutGrid, Send, X, Copy, Check
+} from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
+import { SOCKET_URL } from '../config';
+
+/* ─── helpers ─────────────────────────────────────────── */
+const getInitials = (name = 'Guest') =>
+  name.split(' ').map(n => n[0] || '').join('').slice(0, 2).toUpperCase() || '??';
+
+const randomColor = () => `hsl(${Math.floor(Math.random() * 360)}, 65%, 50%)`;
+
+const fmtTime = (s) => {
+  const m = Math.floor(s / 60), sec = s % 60;
+  return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+};
+
+/* ─── ParticipantTile (separate component so hooks are stable) ─── */
+function ParticipantTile({ participant, localStream, streamsRef }) {
+  const videoRef = useRef(null);
+
+  useEffect(() => {
+    if (participant.videoOff) return;
+
+    const attach = () => {
+      if (!videoRef.current) return;
+      if (participant.isMe) {
+        if (localStream) videoRef.current.srcObject = localStream;
+      } else {
+        const stream = streamsRef.current[participant.socketId];
+        if (stream) videoRef.current.srcObject = stream;
+      }
+    };
+
+    const t = setTimeout(attach, 80);
+    return () => clearTimeout(t);
+  }, [participant.isMe, participant.socketId, participant.videoOff, localStream]);
+
+  return (
+    <div style={{
+      position: 'relative', background: '#1a1a1c',
+      borderRadius: '14px', overflow: 'hidden', aspectRatio: '16/9',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      border: participant.speaking ? '2px solid #00c752' : '2px solid rgba(255,255,255,0.08)',
+      boxShadow: '0 4px 24px rgba(0,0,0,0.4)', transition: 'border-color 0.3s'
+    }}>
+      {/* Avatar / off state */}
+      {participant.videoOff && (
+        <div style={{
+          position: 'absolute', inset: 0, background: '#202124',
+          display: 'flex', alignItems: 'center', justifyContent: 'center'
+        }}>
+          {participant.avatar ? (
+            <img
+              src={`${SOCKET_URL}/${participant.avatar}`}
+              alt={participant.name}
+              style={{ width: 90, height: 90, borderRadius: '50%', objectFit: 'cover', border: '3px solid #3c4043' }}
+              onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
+            />
+          ) : null}
+          <div style={{
+            width: 90, height: 90, borderRadius: '50%',
+            background: participant.color || '#4285f4',
+            display: participant.avatar ? 'none' : 'flex',
+            alignItems: 'center', justifyContent: 'center',
+            fontSize: '32px', fontWeight: '700', color: 'white',
+            border: '3px solid rgba(255,255,255,0.15)',
+            boxShadow: `0 0 0 6px ${(participant.color || '#4285f4')}33`
+          }}>
+            {participant.initials}
+          </div>
+        </div>
+      )}
+
+      {/* Video */}
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted={participant.isMe}
+        style={{
+          width: '100%', height: '100%', objectFit: 'cover',
+          transform: participant.isMe ? 'scaleX(-1)' : 'none',
+          display: participant.videoOff ? 'none' : 'block',
+          background: '#1a1a1c'
+        }}
+      />
+
+      {/* Name bar */}
+      <div style={{
+        position: 'absolute', bottom: 8, left: 8, right: 8,
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', zIndex: 5
+      }}>
+        <span style={{
+          background: 'rgba(0,0,0,0.75)', color: 'white', fontSize: '12px',
+          padding: '3px 10px', borderRadius: '6px', backdropFilter: 'blur(6px)',
+          maxWidth: '70%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
+        }}>
+          {participant.name}{participant.isMe ? ' (You)' : ''}
+        </span>
+        {participant.muted && (
+          <div style={{
+            background: 'rgba(234,67,53,0.9)', borderRadius: '6px',
+            padding: '3px 6px', display: 'flex'
+          }}>
+            <MicOff size={12} color="white" />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─── ControlBtn ──────────────────────────────────────── */
+function ControlBtn({ icon, onClick, active, activeColor = '#3c4043', inactiveColor = '#3c4043', tooltip, badge }) {
+  const [hover, setHover] = useState(false);
+  const bg = active ? activeColor : inactiveColor;
+
+  return (
+    <div style={{ position: 'relative', display: 'inline-flex' }}>
+      <button
+        onClick={onClick}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        style={{
+          width: 52, height: 52, borderRadius: '50%', border: 'none',
+          background: bg, color: 'white', cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          transition: 'all 0.2s', transform: hover ? 'scale(1.08)' : 'scale(1)',
+          boxShadow: hover ? '0 4px 16px rgba(0,0,0,0.4)' : 'none'
+        }}
+      >
+        {icon}
+      </button>
+      {badge > 0 && (
+        <span style={{
+          position: 'absolute', top: -4, right: -4,
+          background: '#8ab4f8', color: '#202124', fontSize: '10px',
+          fontWeight: 'bold', padding: '2px 6px', borderRadius: '10px',
+          border: '2px solid #202124', minWidth: 18, textAlign: 'center'
+        }}>{badge}</span>
+      )}
+      {hover && tooltip && (
+        <div style={{
+          position: 'absolute', bottom: 62, left: '50%', transform: 'translateX(-50%)',
+          background: '#3c4043', color: '#e8eaed', padding: '6px 12px',
+          borderRadius: '8px', fontSize: '12px', whiteSpace: 'nowrap',
+          zIndex: 100, pointerEvents: 'none',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.4)'
+        }}>{tooltip}</div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Main MeetingPage ────────────────────────────────── */
+export default function MeetingPage() {
+  const { meetingCode } = useParams();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { user } = useAuth();
+
+  const initialData = location.state || {};
+
+  // ✅ Declare userName FIRST before any usage
+  const userName = initialData.userName || user?.fullname || user?.username || 'Guest';
+
+  const [micOn, setMicOn] = useState(initialData.micOn ?? true);
+  const [camOn, setCamOn] = useState(initialData.camOn ?? true);
+  const [panel, setPanel] = useState(null);
+  const [handRaised, setHandRaised] = useState(false);
+  const [newMessage, setNewMessage] = useState('');
+  const [messages, setMessages] = useState([]);
+  const [participants, setParticipants] = useState([
+    // Show local "me" tile immediately (before socket confirms)
+    {
+      socketId: 'local-me',
+      isMe: true,
+      name: userName,
+      avatar: user?.avatar || '',
+      videoOff: !(initialData.camOn ?? true),
+      muted: !(initialData.micOn ?? true),
+      initials: getInitials(userName),
+      color: '#4285f4'
+    }
+  ]);
+  const [unread, setUnread] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [localStream, setLocalStream] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const [socketError, setSocketError] = useState(null);
+
+  const socketRef = useRef(null);
+  const localStreamRef = useRef(null);
+  const peersRef = useRef({});
+  const streamsRef = useRef({});
+  const chatEndRef = useRef(null);
+  const panelRef = useRef(panel);
+  panelRef.current = panel;
+
+  // Auto-scroll chat
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  // ── Create peer connection ──────────────────────────
+  const createPeerConnection = useCallback((targetSocketId, isInitiator) => {
+    if (peersRef.current[targetSocketId]) return peersRef.current[targetSocketId];
+
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+      ]
+    });
+
+    peersRef.current[targetSocketId] = pc;
+
+    // Add local tracks
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track =>
+        pc.addTrack(track, localStreamRef.current)
+      );
+    }
+
+    // ICE
+    pc.onicecandidate = (e) => {
+      if (e.candidate && socketRef.current) {
+        socketRef.current.emit('ice-candidate', {
+          candidate: e.candidate, targetSocketId, meetingId: meetingCode
+        });
+      }
+    };
+
+    // Remote track received
+    pc.ontrack = (e) => {
+      streamsRef.current[targetSocketId] = e.streams[0];
+      setParticipants(prev => [...prev]); // trigger re-render to attach video
+    };
+
+    // Initiator creates offer
+    if (isInitiator) {
+      pc.onnegotiationneeded = async () => {
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          socketRef.current?.emit('offer', { offer, targetSocketId, meetingId: meetingCode });
+        } catch (err) {
+          console.error('Offer error:', err);
+        }
+      };
+    }
+
+    return pc;
+  }, [meetingCode]);
+
+  // ── Main effect ─────────────────────────────────────
+  useEffect(() => {
+    const timer = setInterval(() => setDuration(d => d + 1), 1000);
+
+    socketRef.current = io(SOCKET_URL, {
+      auth: { token: localStorage.getItem('accessToken') }
+    });
+
+    const socket = socketRef.current;
+
+    // ── Get local media (with retry for "Device in use") ──
+    const tryGetMedia = async (attempts = 3, delayMs = 600) => {
+      for (let i = 0; i < attempts; i++) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+          return stream;
+        } catch (err) {
+          console.warn(`Media attempt ${i + 1} failed:`, err.name);
+          if (i < attempts - 1) await new Promise(r => setTimeout(r, delayMs));
+        }
+      }
+      // Try audio only as fallback
+      try {
+        const audioOnly = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+        return audioOnly;
+      } catch (_) {
+        return null;
+      }
+    };
+
+    const startStream = async () => {
+      const stream = await tryGetMedia();
+      const hasCam = !!(initialData.camOn ?? true);
+      const hasMic = !!(initialData.micOn ?? true);
+
+      if (stream) {
+        localStreamRef.current = stream;
+        const vTrack = stream.getVideoTracks()[0];
+        const aTrack = stream.getAudioTracks()[0];
+        if (vTrack) vTrack.enabled = hasCam;
+        if (aTrack) aTrack.enabled = hasMic;
+        setLocalStream(stream);
+        // Update local tile: video might be available now
+        setParticipants(prev => prev.map(p =>
+          p.isMe ? { ...p, videoOff: !hasCam || !vTrack } : p
+        ));
+      } else {
+        // No media at all — show avatar tile
+        setParticipants(prev => prev.map(p =>
+          p.isMe ? { ...p, videoOff: true, muted: true } : p
+        ));
+      }
+
+      // ── Join room ──
+      socket.emit('join-room', {
+        meetingId: meetingCode,
+        name: userName,
+        userId: user?._id || user?.id,
+        avatar: user?.avatar || '',
+        isHost: initialData.isHost || false,
+        isCameraOff: !hasCam || !stream?.getVideoTracks().length,
+        isMuted: !hasMic
+      });
+    };
+
+    startStream();
+
+    // ── Room joined (existing participants) ──
+    socket.on('room-joined', ({ participants: existing = [], chatHistory = [], participantId }) => {
+      // Build full participant list, marking isMe by socket id
+      const mapped = existing.map(p => ({
+        ...p,
+        socketId: p.socketId,
+        isMe: p.isMe || p.socketId === participantId,
+        videoOff: (p.isMe || p.socketId === participantId)
+          ? !(initialData.camOn ?? true)
+          : !!p.isCameraOff,
+        muted: (p.isMe || p.socketId === participantId)
+          ? !(initialData.micOn ?? true)
+          : !!p.isMuted,
+        initials: getInitials(p.name),
+        color: (p.isMe || p.socketId === participantId) ? '#4285f4' : randomColor()
+      }));
+
+      // Replace placeholder with real socket-confirmed state
+      setParticipants(mapped.length > 0 ? mapped : prev => prev);
+      setMessages(chatHistory || []);
+
+      // Initiate WebRTC with everyone already in the room
+      existing.forEach(p => {
+        if (!p.isMe && p.socketId && p.socketId !== participantId) {
+          createPeerConnection(p.socketId, true);
+        }
+      });
+    });
+
+    // ── Backend error handling ──
+    socket.on('error', ({ message }) => {
+      console.error('Socket error:', message);
+      setSocketError(message);
+    });
+
+    // ── New participant joined ──
+    socket.on('participant-joined', (participant) => {
+      if (!participant) return;
+      setParticipants(prev => {
+        if (prev.find(x => x.socketId === participant.socketId)) return prev;
+        return [...prev, {
+          ...participant,
+          videoOff: !!participant.isCameraOff,
+          muted: !!participant.isMuted,
+          initials: getInitials(participant.name),
+          color: randomColor()
+        }];
+      });
+      createPeerConnection(participant.socketId, true);
+    });
+
+    // ── Participant left ──
+    socket.on('participant-left', ({ socketId }) => {
+      setParticipants(prev => prev.filter(p => p.socketId !== socketId));
+      if (peersRef.current[socketId]) {
+        peersRef.current[socketId].close();
+        delete peersRef.current[socketId];
+      }
+      delete streamsRef.current[socketId];
+    });
+
+    // ── WebRTC signaling ──
+    socket.on('offer', async ({ offer, fromSocketId }) => {
+      const pc = createPeerConnection(fromSocketId, false);
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socket.emit('answer', { answer, targetSocketId: fromSocketId, meetingId: meetingCode });
+    });
+
+    socket.on('answer', async ({ answer, fromSocketId }) => {
+      const pc = peersRef.current[fromSocketId];
+      if (pc) await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    });
+
+    socket.on('ice-candidate', ({ candidate, fromSocketId }) => {
+      const pc = peersRef.current[fromSocketId];
+      if (pc && candidate) pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+    });
+
+    // ── Chat ──
+    socket.on('new-message', (msg) => {
+      setMessages(prev => [...prev, msg]);
+      if (panelRef.current !== 'chat') setUnread(u => u + 1);
+    });
+
+    // ── Media toggles from others ──
+    socket.on('participant-muted', ({ socketId, isMuted }) => {
+      setParticipants(prev => prev.map(p =>
+        p.socketId === socketId ? { ...p, muted: isMuted } : p
+      ));
+    });
+
+    socket.on('participant-camera-toggled', ({ socketId, isCameraOff }) => {
+      setParticipants(prev => prev.map(p =>
+        p.socketId === socketId ? { ...p, videoOff: isCameraOff } : p
+      ));
+    });
+
+    socket.on('meeting-ended', () => navigate('/post', { state: { meetingCode, duration } }));
+
+    return () => {
+      clearInterval(timer);
+      socket.disconnect();
+      localStreamRef.current?.getTracks().forEach(t => t.stop());
+      Object.values(peersRef.current).forEach(pc => pc.close());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meetingCode]);
+
+  // ── Controls ────────────────────────────────────────
+  const toggleMic = () => {
+    const next = !micOn;
+    setMicOn(next);
+    const aTrack = localStreamRef.current?.getAudioTracks()[0];
+    if (aTrack) aTrack.enabled = next;
+    setParticipants(prev => prev.map(p => p.isMe ? { ...p, muted: !next } : p));
+    socketRef.current?.emit('toggle-mute', { meetingId: meetingCode, isMuted: !next });
+  };
+
+  const toggleCam = () => {
+    const next = !camOn;
+    setCamOn(next);
+    const vTrack = localStreamRef.current?.getVideoTracks()[0];
+    if (vTrack) vTrack.enabled = next;
+    setParticipants(prev => prev.map(p => p.isMe ? { ...p, videoOff: !next } : p));
+    socketRef.current?.emit('toggle-camera', { meetingId: meetingCode, isCameraOff: !next });
+    // Re-set stream on video element when turning back on
+    if (next) setLocalStream(s => s); // trigger re-render
+  };
+
+  const sendMessage = () => {
+    if (!(newMessage || '').trim()) return;
+    socketRef.current?.emit('send-message', {
+      meetingId: meetingCode,
+      message: newMessage.trim(),
+      senderName: userName,
+      senderId: user?._id || user?.id
+    });
+    setNewMessage('');
+  };
+
+  const handleLeave = () => navigate('/post', { state: { meetingCode, duration } });
+
+  const togglePanel = (p) => {
+    setPanel(prev => prev === p ? null : p);
+    if (p === 'chat') setUnread(0);
+  };
+
+  const copyCode = () => {
+    navigator.clipboard.writeText(meetingCode).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  // ── Grid layout ─────────────────────────────────────
+  const count = participants.length || 1;
+  const gridCols = count === 1 ? '1fr'
+    : count <= 2 ? 'repeat(2, 1fr)'
+    : count <= 4 ? 'repeat(2, 1fr)'
+    : 'repeat(3, 1fr)';
+
+  /* ═══════════ RENDER ═══════════ */
+  return (
+    <div style={{ height: '100vh', background: '#202124', display: 'flex', flexDirection: 'column', overflow: 'hidden', fontFamily: "'Google Sans', Roboto, sans-serif" }}>
+
+      {/* ── Top Bar ── */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '12px 20px', position: 'absolute', top: 0, left: 0, right: 0, zIndex: 20
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ color: '#e8eaed', fontSize: 15, fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>
+            {fmtTime(duration)}
+          </span>
+          <button
+            onClick={copyCode}
+            title="Copy meeting code"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              background: '#2d2e30', border: 'none', borderRadius: 8,
+              padding: '4px 12px', color: '#9aa0a6', fontSize: 13,
+              cursor: 'pointer', transition: 'all 0.2s'
+            }}
+          >
+            {meetingCode}
+            {copied ? <Check size={14} color="#00c752" /> : <Copy size={14} />}
+          </button>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {handRaised && (
+            <span style={{
+              background: '#fbbc04', color: '#202124', padding: '4px 14px',
+              borderRadius: 20, fontSize: 13, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4
+            }}>✋ Hand raised</span>
+          )}
+          <div style={{
+            background: '#2d2e30', borderRadius: 8, padding: '4px 12px',
+            display: 'flex', alignItems: 'center', gap: 6
+          }}>
+            <Users size={14} color="#9aa0a6" />
+            <span style={{ color: '#9aa0a6', fontSize: 13 }}>{participants.length}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Main Area ── */}
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden', paddingTop: 60, paddingBottom: 88 }}>
+
+        {/* Video Grid */}
+        <div style={{ flex: 1, padding: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', position: 'relative' }}>
+          {socketError ? (
+            <div style={{ textAlign: 'center', background: 'rgba(234,67,53,0.1)', padding: '24px 32px', borderRadius: 16, border: '1px solid rgba(234,67,53,0.3)' }}>
+              <div style={{ fontSize: 40, marginBottom: 12 }}>⚠️</div>
+              <h3 style={{ color: '#e8eaed', marginBottom: 8 }}>Connection failed</h3>
+              <p style={{ color: '#ea4335', fontSize: 16 }}>{socketError}</p>
+              <button 
+                onClick={() => navigate('/')} 
+                style={{ marginTop: 20, padding: '10px 20px', background: '#3c4043', color: 'white', border: 'none', borderRadius: 8, cursor: 'pointer' }}
+              >
+                Go back to Home
+              </button>
+            </div>
+          ) : participants.length === 0 ? (
+            <div style={{ textAlign: 'center', color: '#5f6368' }}>
+              <div style={{ fontSize: 48, marginBottom: 16 }}>📹</div>
+              <p style={{ fontSize: 16 }}>Connecting to meeting...</p>
+            </div>
+          ) : (
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: gridCols,
+              gap: 12, width: '100%', maxHeight: '100%', alignContent: 'center'
+            }}>
+              {participants.map(p => (
+                <ParticipantTile
+                  key={p.socketId || 'local-me'}
+                  participant={p}
+                  localStream={localStream}
+                  streamsRef={streamsRef}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* ── Side Panel ── */}
+        {panel && (
+          <div style={{
+            width: 340, background: '#2d2e30', borderLeft: '1px solid #3c4043',
+            display: 'flex', flexDirection: 'column', transition: 'all 0.3s'
+          }}>
+            {/* Panel Header */}
+            <div style={{
+              padding: '16px 20px', borderBottom: '1px solid #3c4043',
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between'
+            }}>
+              <h3 style={{ color: '#e8eaed', fontWeight: 500, fontSize: 16, margin: 0 }}>
+                {panel === 'chat' ? '💬 In-call messages' : `👥 People (${participants.length})`}
+              </h3>
+              <button
+                onClick={() => setPanel(null)}
+                style={{ background: 'none', border: 'none', color: '#9aa0a6', cursor: 'pointer', padding: 4, borderRadius: 4 }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Participants list */}
+            {panel === 'participants' && (
+              <div style={{ flex: 1, overflowY: 'auto', padding: 12 }}>
+                {participants.map(p => (
+                  <div key={p.socketId || 'local-me'} style={{
+                    display: 'flex', alignItems: 'center', gap: 12,
+                    padding: '10px 8px', borderRadius: 10,
+                    background: 'transparent', transition: 'background 0.2s',
+                    cursor: 'default'
+                  }}
+                    onMouseEnter={e => e.currentTarget.style.background = '#3c4043'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                  >
+                    <div style={{
+                      width: 38, height: 38, borderRadius: '50%',
+                      background: p.color, flexShrink: 0,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      fontSize: 14, fontWeight: 600, color: 'white'
+                    }}>{p.initials}</div>
+                    <span style={{ flex: 1, color: '#e8eaed', fontSize: 14 }}>
+                      {p.name}{p.isMe ? ' (You)' : ''}
+                    </span>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      {p.muted ? <MicOff size={16} color="#ea4335" /> : <Mic size={16} color="#9aa0a6" />}
+                      {p.videoOff ? <VideoOff size={16} color="#ea4335" /> : <Video size={16} color="#9aa0a6" />}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Chat */}
+            {panel === 'chat' && (
+              <>
+                <div style={{ flex: 1, overflowY: 'auto', padding: '16px 16px 8px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  {messages.length === 0 && (
+                    <p style={{ color: '#5f6368', fontSize: 13, textAlign: 'center', marginTop: 20 }}>
+                      No messages yet. Say hello! 👋
+                    </p>
+                  )}
+                  {messages.map((msg, idx) => {
+                    const isMe = msg.senderName === userName;
+                    return (
+                      <div key={idx} style={{ display: 'flex', flexDirection: 'column', alignItems: isMe ? 'flex-end' : 'flex-start' }}>
+                        {!isMe && (
+                          <span style={{ fontSize: 11, color: '#9aa0a6', marginBottom: 3, paddingLeft: 4 }}>{msg.senderName}</span>
+                        )}
+                        <div style={{
+                          background: isMe ? 'linear-gradient(135deg, #1a73e8, #4285f4)' : '#3c4043',
+                          padding: '10px 14px',
+                          borderRadius: isMe ? '18px 18px 4px 18px' : '4px 18px 18px 18px',
+                          maxWidth: '82%', boxShadow: '0 1px 4px rgba(0,0,0,0.3)'
+                        }}>
+                          <p style={{ color: '#e8eaed', fontSize: 14, lineHeight: 1.45, margin: 0 }}>{msg.message}</p>
+                          <p style={{ color: isMe ? 'rgba(255,255,255,0.55)' : '#9aa0a6', fontSize: 10, marginTop: 4, textAlign: 'right', margin: '4px 0 0' }}>
+                            {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <div ref={chatEndRef} />
+                </div>
+
+                {/* Chat Input */}
+                <div style={{ padding: 12, borderTop: '1px solid #3c4043' }}>
+                  <div style={{
+                    display: 'flex', gap: 8, alignItems: 'center',
+                    background: '#3c4043', borderRadius: 24, padding: '8px 8px 8px 16px'
+                  }}>
+                    <input
+                      value={newMessage}
+                      onChange={e => setNewMessage(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendMessage()}
+                      placeholder="Send a message…"
+                      style={{
+                        flex: 1, background: 'none', border: 'none', outline: 'none',
+                        color: '#e8eaed', fontSize: 14
+                      }}
+                    />
+                    <button
+                      onClick={sendMessage}
+                      disabled={!(newMessage || '').trim()}
+                      style={{
+                        width: 36, height: 36, borderRadius: '50%', border: 'none',
+                        background: (newMessage || '').trim() ? '#1a73e8' : '#5f6368',
+                        color: 'white', cursor: (newMessage || '').trim() ? 'pointer' : 'default',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        transition: 'background 0.2s', flexShrink: 0
+                      }}
+                    >
+                      <Send size={16} />
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── Bottom Toolbar ── */}
+      <div style={{
+        position: 'absolute', bottom: 0, left: 0, right: 0,
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '12px 28px 20px',
+        background: 'linear-gradient(transparent, rgba(32,33,36,0.98))',
+        zIndex: 20
+      }}>
+        {/* Left: code */}
+        <div style={{ minWidth: 120 }}>
+          <span style={{ color: '#5f6368', fontSize: 13 }}>{meetingCode}</span>
+        </div>
+
+        {/* Center: controls */}
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          <ControlBtn
+            active={micOn} activeColor="#3c4043" inactiveColor="#ea4335"
+            icon={micOn ? <Mic size={22} /> : <MicOff size={22} />}
+            onClick={toggleMic} tooltip={micOn ? 'Mute mic' : 'Unmute mic'}
+          />
+          <ControlBtn
+            active={camOn} activeColor="#3c4043" inactiveColor="#ea4335"
+            icon={camOn ? <Video size={22} /> : <VideoOff size={22} />}
+            onClick={toggleCam} tooltip={camOn ? 'Turn off camera' : 'Turn on camera'}
+          />
+          <ControlBtn
+            active={true} activeColor="#3c4043"
+            icon={<Monitor size={22} />} tooltip="Present now"
+          />
+          <ControlBtn
+            active={handRaised} activeColor="#fbbc04" inactiveColor="#3c4043"
+            icon={<Hand size={22} />}
+            onClick={() => setHandRaised(h => !h)}
+            tooltip={handRaised ? 'Lower hand' : 'Raise hand'}
+          />
+
+          {/* Leave */}
+          <button
+            onClick={handleLeave}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '14px 26px', borderRadius: 50, border: 'none',
+              background: '#ea4335', color: 'white', fontSize: 15,
+              cursor: 'pointer', transition: 'all 0.2s',
+              boxShadow: '0 2px 12px rgba(234,67,53,0.45)'
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = '#c5221f'}
+            onMouseLeave={e => e.currentTarget.style.background = '#ea4335'}
+          >
+            <PhoneOff size={20} />
+          </button>
+        </div>
+
+        {/* Right: panels */}
+        <div style={{ display: 'flex', gap: 8, minWidth: 120, justifyContent: 'flex-end' }}>
+          <ControlBtn
+            active={panel === 'chat'} activeColor="#1a73e8" inactiveColor="#3c4043"
+            icon={<MessageSquare size={22} />}
+            onClick={() => togglePanel('chat')}
+            tooltip="Chat" badge={unread}
+          />
+          <ControlBtn
+            active={panel === 'participants'} activeColor="#1a73e8" inactiveColor="#3c4043"
+            icon={<Users size={22} />}
+            onClick={() => togglePanel('participants')}
+            tooltip="Participants"
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
