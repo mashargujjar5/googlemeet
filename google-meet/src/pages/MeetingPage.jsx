@@ -27,39 +27,51 @@ function JoinRequestModal({ requests, onAccept, onReject }) {
 
   return (
     <div style={{
-      position: 'absolute', top: 80, left: 24, zIndex: 1000,
-      background: '#2d2e30', borderRadius: '12px', padding: '16px',
-      boxShadow: '0 8px 32px rgba(0,0,0,0.5)', border: '1px solid #3c4043',
-      width: '300px', display: 'flex', flexDirection: 'column', gap: '12px',
-      animation: 'slideIn 0.3s ease-out'
+      position: 'absolute', top: 84, left: 24, zIndex: 1000,
+      background: 'rgba(45, 46, 48, 0.95)', borderRadius: '16px', padding: '20px',
+      boxShadow: '0 12px 40px rgba(0,0,0,0.6)', border: '1px solid rgba(255,255,255,0.1)',
+      width: '320px', display: 'flex', flexDirection: 'column', gap: '16px',
+      backdropFilter: 'blur(12px)',
+      animation: 'slideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1)'
     }}>
       <style>{`
-        @keyframes slideIn { from { transform: translateX(-20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        @keyframes slideIn { from { transform: translateX(-30px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
       `}</style>
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
         <div style={{
-          width: 40, height: 40, borderRadius: '50%', background: '#1a73e8',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', color: 'white'
+          width: 44, height: 44, borderRadius: '50%', 
+          background: 'linear-gradient(135deg, #4285f4, #1a73e8)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', 
+          fontWeight: '600', color: 'white', fontSize: '15px',
+          boxShadow: '0 4px 12px rgba(26,115,232,0.3)'
         }}>{getInitials(req.name)}</div>
         <div style={{ flex: 1 }}>
-          <p style={{ color: '#e8eaed', fontSize: '14px', margin: 0, fontWeight: 500 }}>{req.name}</p>
-          <p style={{ color: '#9aa0a6', fontSize: '12px', margin: 0 }}>wants to join this call</p>
+          <p style={{ color: '#e8eaed', fontSize: '15px', margin: 0, fontWeight: 500 }}>{req.name}</p>
+          <p style={{ color: '#9aa0a6', fontSize: '12px', margin: 0, marginTop: 2 }}>wants to join this call</p>
         </div>
       </div>
-      <div style={{ display: 'flex', gap: '8px' }}>
+      <div style={{ display: 'flex', gap: '10px' }}>
         <button
           onClick={() => onReject(req.socketId)}
           style={{
-            flex: 1, padding: '8px', borderRadius: '6px', border: 'none',
-            background: 'transparent', color: '#8ab4f8', cursor: 'pointer', fontSize: '13px'
+            flex: 1, padding: '10px', borderRadius: '10px', border: '1px solid #5f6368',
+            background: 'transparent', color: '#e8eaed', cursor: 'pointer', 
+            fontSize: '13px', fontWeight: 500, transition: 'all 0.2s'
           }}
+          onMouseEnter={e => e.target.style.background = 'rgba(255,255,255,0.05)'}
+          onMouseLeave={e => e.target.style.background = 'transparent'}
         >Deny</button>
         <button
           onClick={() => onAccept(req.socketId)}
           style={{
-            flex: 1, padding: '8px', borderRadius: '6px', border: 'none',
-            background: '#1a73e8', color: 'white', cursor: 'pointer', fontSize: '13px'
+            flex: 2, padding: '10px', borderRadius: '10px', border: 'none',
+            background: 'linear-gradient(135deg, #1a73e8, #4285f4)', color: 'white', cursor: 'pointer', 
+            fontSize: '13px', fontWeight: 600, transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+            boxShadow: '0 4px 12px rgba(26,115,232,0.4)',
+            position: 'relative', overflow: 'hidden'
           }}
+          onMouseEnter={e => { e.target.style.transform = 'translateY(-2px)'; e.target.style.boxShadow = '0 6px 20px rgba(26,115,232,0.6)'; }}
+          onMouseLeave={e => { e.target.style.transform = 'translateY(0)'; e.target.style.boxShadow = '0 4px 12px rgba(26,115,232,0.4)'; }}
         >Admit</button>
       </div>
     </div>
@@ -316,6 +328,7 @@ export default function MeetingPage() {
   const streamsRef = useRef({});
   const chatEndRef = useRef(null);
   const panelRef = useRef(panel);
+  const notificationRef = useRef(new Audio('https://assets.mixkit.co/active_storage/sfx/2358/2358-preview.mp3'));
   panelRef.current = panel;
 
   // Auto-scroll chat
@@ -362,6 +375,7 @@ export default function MeetingPage() {
     if (isInitiator) {
       pc.onnegotiationneeded = async () => {
         try {
+          if (pc.signalingState !== 'stable') return;
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
           socketRef.current?.emit('offer', { offer, targetSocketId, meetingId: meetingCode });
@@ -478,6 +492,16 @@ export default function MeetingPage() {
 
     socket.on('incoming-join-request', (req) => {
       setJoinRequests(prev => [...prev, req]);
+      // Play sound notification for host
+      notificationRef.current.play().catch(() => {});
+    });
+
+    socket.on('pending-requests-sync', ({ requests }) => {
+      setJoinRequests(requests);
+    });
+
+    socket.on('participant-cancelled-request', ({ socketId }) => {
+      setJoinRequests(prev => prev.filter(r => r.socketId !== socketId));
     });
 
     // ── Room joined (existing participants) ──
@@ -544,21 +568,46 @@ export default function MeetingPage() {
 
     // ── WebRTC signaling ──
     socket.on('offer', async ({ offer, fromSocketId }) => {
-      const pc = createPeerConnection(fromSocketId, false);
-      await pc.setRemoteDescription(new RTCSessionDescription(offer));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      socket.emit('answer', { answer, targetSocketId: fromSocketId, meetingId: meetingCode });
+      try {
+        const pc = createPeerConnection(fromSocketId, false);
+        // If we're already handling something, we might want to ignore or rollback
+        // For simple stability, we only process if stable or already handling an offer
+        if (pc.signalingState !== "stable" && pc.signalingState !== "have-remote-offer") {
+          console.warn(`[WebRTC] Ignoring offer from ${fromSocketId} due to state: ${pc.signalingState}`);
+          return;
+        }
+        
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('answer', { answer, targetSocketId: fromSocketId, meetingId: meetingCode });
+      } catch (err) {
+        console.error('Error handling offer:', err);
+      }
     });
 
     socket.on('answer', async ({ answer, fromSocketId }) => {
-      const pc = peersRef.current[fromSocketId];
-      if (pc) await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      try {
+        const pc = peersRef.current[fromSocketId];
+        if (pc && pc.signalingState === "have-local-offer") {
+          await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        } else if (pc) {
+          console.warn(`[WebRTC] Ignoring answer from ${fromSocketId} due to state: ${pc.signalingState}`);
+        }
+      } catch (err) {
+        console.error('Error handling answer:', err);
+      }
     });
 
     socket.on('ice-candidate', ({ candidate, fromSocketId }) => {
-      const pc = peersRef.current[fromSocketId];
-      if (pc && candidate) pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+      try {
+        const pc = peersRef.current[fromSocketId];
+        if (pc && candidate && pc.remoteDescription) {
+          pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+        }
+      } catch (err) {
+        console.error('Error handling ice-candidate:', err);
+      }
     });
 
     // ── Chat ──
@@ -706,6 +755,12 @@ export default function MeetingPage() {
     // Explicitly call cleanup logic if navigate doesn't trigger it fast enough
     if (localStreamRef.current) localStreamRef.current.getTracks().forEach(t => t.stop());
     if (screenStream) screenStream.getTracks().forEach(t => t.stop());
+    
+    // If we were waiting for host, cancel request
+    if (joinStatus === 'waiting' || joinStatus === 'requesting') {
+      socketRef.current?.emit('cancel-join-request', { meetingId: meetingCode });
+    }
+    
     navigate('/post', { state: { meetingCode, duration } });
   };
 
@@ -814,11 +869,57 @@ export default function MeetingPage() {
               </button>
             </div>
           ) : joinStatus === 'waiting' || joinStatus === 'requesting' ? (
-            <div style={{ textAlign: 'center', background: '#2d2e30', padding: '40px', borderRadius: '24px', maxWidth: '400px', boxShadow: '0 12px 40px rgba(0,0,0,0.3)' }}>
-              <div className="loader" style={{ width: '60px', height: '60px', border: '4px solid #3c4043', borderTop: '4px solid #1a73e8', borderRadius: '50%', margin: '0 auto 24px', animation: 'spin 1s linear infinite' }} />
-              <h2 style={{ color: '#e8eaed', fontSize: '24px', fontWeight: '400', marginBottom: '12px' }}>Asking to join...</h2>
-              <p style={{ color: '#9aa0a6', fontSize: '15px' }}>You'll join the call when someone lets you in.</p>
-              <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
+            <div style={{ 
+              textAlign: 'center', 
+              background: 'rgba(45, 46, 48, 0.4)', 
+              padding: '60px 48px', 
+              borderRadius: '32px', 
+              maxWidth: '440px', 
+              boxShadow: '0 24px 64px rgba(0,0,0,0.4)',
+              backdropFilter: 'blur(16px)',
+              border: '1px solid rgba(255,255,255,0.08)',
+              animation: 'fadeIn 0.6s ease-out'
+            }}>
+              <style>{`
+                @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+                @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+              `}</style>
+              <div style={{ position: 'relative', width: '72px', height: '72px', margin: '0 auto 32px' }}>
+                <div style={{ 
+                  position: 'absolute', inset: 0,
+                  border: '3px solid rgba(138, 180, 248, 0.1)', 
+                  borderTop: '3px solid #8ab4f8', 
+                  borderRadius: '50%', 
+                  animation: 'spin 0.8s cubic-bezier(0.4, 0, 0.2, 1) infinite',
+                  boxShadow: '0 0 20px rgba(138, 180, 248, 0.1)'
+                }} />
+                <div style={{ 
+                  position: 'absolute', inset: '8px',
+                  border: '2px solid rgba(66, 133, 244, 0.05)', 
+                  borderBottom: '2px solid #4285f4', 
+                  borderRadius: '50%', 
+                  animation: 'spin 1.2s linear infinite reverse',
+                  opacity: 0.8
+                }} />
+              </div>
+              <h2 style={{ color: '#e8eaed', fontSize: '28px', fontWeight: '400', marginBottom: '16px', letterSpacing: '-0.5px' }}>
+                Asking to join...
+              </h2>
+              <p style={{ color: '#9aa0a6', fontSize: '16px', lineHeight: '1.6', marginBottom: '32px' }}>
+                The meeting host will let you in shortly. <br/> Make sure your camera and mic are ready.
+              </p>
+              <button
+                onClick={handleLeave}
+                style={{
+                  padding: '12px 24px', borderRadius: '12px', border: '1px solid #5f6368',
+                  background: 'transparent', color: '#e8eaed', cursor: 'pointer',
+                  fontSize: '14px', fontWeight: 500, transition: 'all 0.2s'
+                }}
+                onMouseEnter={e => { e.target.style.background = 'rgba(234, 67, 53, 0.1)'; e.target.style.borderColor = '#ea4335'; e.target.style.color = '#ea4335'; }}
+                onMouseLeave={e => { e.target.style.background = 'transparent'; e.target.style.borderColor = '#5f6368'; e.target.style.color = '#e8eaed'; }}
+              >
+                Cancel Request
+              </button>
             </div>
           ) : participants.length === 0 ? (
             <div style={{ textAlign: 'center', color: '#5f6368' }}>

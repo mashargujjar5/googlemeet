@@ -11,7 +11,7 @@ const getHeaders = () => {
 
 export const apiRequest = async (endpoint, options = {}) => {
   const url = `${API_BASE_URL}${endpoint}`;
-  
+
   const headers = {
     ...getHeaders(),
     ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),

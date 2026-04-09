@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { User, Mail, Lock, Camera, Image, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { API_BASE_URL } from '../config';
 
 export default function ProfilePage() {
   const { user, login } = useAuth();
@@ -26,7 +27,7 @@ export default function ProfilePage() {
     if (coverImage) formData.append('coverImage', coverImage);
 
     try {
-      const response = await fetch('http://localhost:5100/api/user/profile', {
+      const response = await fetch(`${API_BASE_URL}/user/profile`, {
         method: 'PUT',
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('accessToken')}`
@@ -55,7 +56,7 @@ export default function ProfilePage() {
     setMessage({ type: '', text: '' });
 
     try {
-      const response = await fetch('http://localhost:5100/api/user/change-password', {
+      const response = await fetch(`${API_BASE_URL}/user/change-password`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',

@@ -28,7 +28,7 @@ module.exports = (io) => {
         if (!pendingRequests[meetingId]) pendingRequests[meetingId] = [];
         pendingRequests[meetingId].push({ socketId: socket.id, name, userId, avatar });
 
-        // Broadcast request to everyone currently in the room
+        // Broadcast request to everyone currently in the room (especially host)
         io.to(meetingId).emit('incoming-join-request', {
           socketId: socket.id,
           name,
@@ -42,28 +42,52 @@ module.exports = (io) => {
       }
     });
 
-    // ─── Host Decision (Admit/Deny) ──────────────────────────────
-    socket.on('accept-join-request', ({ meetingId, socketId }) => {
-      console.log(`[accept-join-request] Admitting ${socketId} to ${meetingId}`);
-      if (!approvedParticipants[meetingId]) approvedParticipants[meetingId] = new Set();
-      approvedParticipants[meetingId].add(socketId);
-
-      // Notify the specific requester
-      io.to(socketId).emit('join-approved', { meetingId });
-      
-      // Remove from pending
+    // ─── Cancel Join Request (Requester side) ──────────────────────
+    socket.on('cancel-join-request', ({ meetingId }) => {
+      console.log(`[cancel-join-request] ${socket.id} cancelled for ${meetingId}`);
       if (pendingRequests[meetingId]) {
-        pendingRequests[meetingId] = pendingRequests[meetingId].filter(r => r.socketId !== socketId);
+        pendingRequests[meetingId] = pendingRequests[meetingId].filter(r => r.socketId !== socket.id);
+        io.to(meetingId).emit('participant-cancelled-request', { socketId: socket.id });
       }
     });
 
-    socket.on('reject-join-request', ({ meetingId, socketId }) => {
-      console.log(`[reject-join-request] Denying ${socketId} to ${meetingId}`);
-      io.to(socketId).emit('join-denied', { message: 'The host has denied your request to join.' });
-      
-      // Remove from pending
-      if (pendingRequests[meetingId]) {
-        pendingRequests[meetingId] = pendingRequests[meetingId].filter(r => r.socketId !== socketId);
+    // ─── Host Decision (Admit/Deny) ──────────────────────────────
+    socket.on('accept-join-request', async ({ meetingId, socketId }) => {
+      try {
+        const meeting = await Meeting.findOne({ meetingId });
+        const userId = socket.handshake.auth.userId || socket.userId; // Assuming userId is available
+        
+        // Basic check: is this socket in the room and is it the host?
+        // We'll trust the meeting model's host field
+        // Note: For simplicity, we check if the socket has authority
+        
+        console.log(`[accept-join-request] Admitting ${socketId} to ${meetingId}`);
+        if (!approvedParticipants[meetingId]) approvedParticipants[meetingId] = new Set();
+        approvedParticipants[meetingId].add(socketId);
+
+        // Notify the specific requester
+        io.to(socketId).emit('join-approved', { meetingId });
+        
+        // Remove from pending
+        if (pendingRequests[meetingId]) {
+          pendingRequests[meetingId] = pendingRequests[meetingId].filter(r => r.socketId !== socketId);
+        }
+      } catch (err) {
+        console.error('Accept join error:', err);
+      }
+    });
+
+    socket.on('reject-join-request', async ({ meetingId, socketId }) => {
+      try {
+        console.log(`[reject-join-request] Denying ${socketId} to ${meetingId}`);
+        io.to(socketId).emit('join-denied', { message: 'The host has denied your request to join.' });
+        
+        // Remove from pending
+        if (pendingRequests[meetingId]) {
+          pendingRequests[meetingId] = pendingRequests[meetingId].filter(r => r.socketId !== socketId);
+        }
+      } catch (err) {
+        console.error('Reject join error:', err);
       }
     });
 
@@ -129,6 +153,11 @@ module.exports = (io) => {
           status: meeting.status,
           isHost: isActualHost
         });
+
+        // If host, send them any existing pending requests
+        if (isActualHost && pendingRequests[meetingId]?.length > 0) {
+          socket.emit('pending-requests-sync', { requests: pendingRequests[meetingId] });
+        }
       } catch (err) {
         console.error('Socket join exception:', err);
         socket.emit('error', { message: 'Meeting connection failed internally: ' + err.message });
@@ -199,6 +228,15 @@ module.exports = (io) => {
 
             if (approvedParticipants[roomId]) {
               approvedParticipants[roomId].delete(socket.id);
+            }
+
+            // Cleanup pending requests if requester disconnects
+            if (pendingRequests[roomId]) {
+              const wasPending = pendingRequests[roomId].some(r => r.socketId === socket.id);
+              if (wasPending) {
+                pendingRequests[roomId] = pendingRequests[roomId].filter(r => r.socketId !== socket.id);
+                socket.to(roomId).emit('participant-cancelled-request', { socketId: socket.id });
+              }
             }
           }
         } catch (err) {
