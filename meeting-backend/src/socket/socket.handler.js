@@ -1,4 +1,5 @@
 const Meeting = require('../models/meeting.model');
+const jwt = require('jsonwebtoken');
 
 // In-memory chat per meeting (resets on server restart)
 const chatHistories = {};
@@ -7,6 +8,23 @@ const pendingRequests = {}; // meetingId -> [ {socketId, name, userId, avatar} ]
 const approvedParticipants = {}; // meetingId -> Set(userId or socketId)
 
 module.exports = (io) => {
+  // ─── Socket Auth Middleware ──────────────────────────────────
+  io.use((socket, next) => {
+    try {
+      const token = socket.handshake.auth.token;
+      console.log(`[Socket Auth] Connection attempt. Token: ${token ? 'Present' : 'Missing'}`);
+      if (!token) return next();
+
+      const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+      socket.userId = decoded._id || decoded.id; // Support both
+      console.log(`[Socket Auth] Verified User ID: ${socket.userId}`);
+      next();
+    } catch (err) {
+      console.error(`[Socket Auth] Failed: ${err.message}`);
+      next();
+    }
+  });
+
   io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
 
@@ -18,6 +36,10 @@ module.exports = (io) => {
         
         if (!meeting) {
           return socket.emit('error', { message: 'Meeting not found' });
+        }
+
+        if (meeting.status === 'ended') {
+          return socket.emit('error', { message: 'This meeting has already ended.' });
         }
 
         // If user is the host, they should be able to join directly
@@ -98,6 +120,10 @@ module.exports = (io) => {
         
         if (!meeting) {
           return socket.emit('error', { message: 'Meeting not found. Please check your code.' });
+        }
+
+        if (meeting.status === 'ended') {
+          return socket.emit('error', { message: 'This meeting has ended and is no longer active.' });
         }
 
         const isActualHost = (meeting.host && String(meeting.host) === String(userId)) || isHost;
@@ -213,6 +239,37 @@ module.exports = (io) => {
         { $set: { 'participants.$.isCameraOff': isCameraOff } }
       );
       socket.to(meetingId).emit('participant-camera-toggled', { socketId: socket.id, isCameraOff });
+    });
+
+    socket.on('end-meeting', async ({ meetingId }) => {
+      try {
+        const meeting = await Meeting.findOne({ meetingId });
+        if (!meeting) {
+          console.warn(`[end-meeting] Meeting ${meetingId} not found`);
+          return;
+        }
+
+        const userId = socket.userId;
+        const hostId = String(meeting.host);
+        const reqBy = String(userId);
+        const isActualHost = hostId === reqBy;
+
+        console.log(`[end-meeting] Attempt: MeetingID=${meetingId}, Requester=${reqBy}, Host=${hostId}, Match=${isActualHost}`);
+
+        if (isActualHost) {
+          meeting.status = 'ended';
+          meeting.participants = []; 
+          await meeting.save();
+          
+          io.to(meetingId).emit('meeting-ended');
+          console.log(`[end-meeting] Success: Meeting ${meetingId} ended by host.`);
+        } else {
+          console.error(`[end-meeting] Denied: ${reqBy} is not the host of ${meetingId}`);
+          socket.emit('error', { message: "Permission Denied: Only the meeting creator can end it for all." });
+        }
+      } catch (err) {
+        console.error('[end-meeting] Exception:', err);
+      }
     });
 
     // ─── Disconnect ─────────────────────────────────────────────

@@ -360,7 +360,7 @@ export default function MeetingPage() {
   const { meetingCode } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
 
   const initialData = location.state || {};
 
@@ -669,6 +669,7 @@ export default function MeetingPage() {
 
     // ── Room joined (existing participants) ──
     socket.on('room-joined', ({ participants: existing = [], chatHistory = [], participantId, isHost: actualHost }) => {
+      console.log(`[Meeting] Joined. isHost reported by server: ${actualHost}`);
       if (actualHost) setIsHost(true);
       // Build full participant list, marking isMe by socket id
       const mapped = existing.map(p => ({
@@ -837,7 +838,7 @@ export default function MeetingPage() {
 
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [meetingCode]); // Remove screenStream from deps to avoid reconnects
+  }, [meetingCode, authLoading]); // Added authLoading to ensure user data is ready
 
   // ── Controls ────────────────────────────────────────
   const toggleMic = () => {
@@ -947,9 +948,19 @@ export default function MeetingPage() {
   };
 
   const handleLeave = () => {
-    // Explicitly call cleanup logic if navigate doesn't trigger it fast enough
+    console.log(`[Meeting] handleLeave called. isHost: ${isHost}`);
+    if (isHost) {
+      const confirmEnd = window.confirm("Do you want to end the meeting for everyone? \n\nClick 'OK' to end for all, or 'Cancel' to just leave yourself.");
+      if (confirmEnd) {
+        console.log(`[Meeting] Host chose to end meeting for all: ${meetingCode}`);
+        socketRef.current?.emit('end-meeting', { meetingId: meetingCode });
+        return;
+      }
+    }
+
+    // Standard Leave
     if (localStreamRef.current) localStreamRef.current.getTracks().forEach(t => t.stop());
-    if (screenStream) screenStream.getTracks().forEach(t => t.stop());
+    if (screenStreamRef.current) screenStreamRef.current.getTracks().forEach(t => t.stop());
     
     // If we were waiting for host, cancel request
     if (joinStatus === 'waiting' || joinStatus === 'requesting') {
