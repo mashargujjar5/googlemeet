@@ -130,6 +130,56 @@ function SettingsModal({ isOpen, onClose, audioOutputs, selectedOutput, onSelect
 /* ─── ParticipantTile (separate component so hooks are stable) ─── */
 function ParticipantTile({ participant, localStream, streamsRef, selectedOutput }) {
   const videoRef = useRef(null);
+  const [level, setLevel] = useState(0);
+  const audioCtxRef = useRef(null);
+  const analyserRef = useRef(null);
+  const animationRef = useRef(null);
+
+  useEffect(() => {
+    // Only detect volume if camera is off (to show rings) or for indicators
+    const startDetection = () => {
+      try {
+        const stream = participant.isMe ? localStream : streamsRef.current[participant.socketId];
+        if (!stream || !stream.getAudioTracks().length) return;
+
+        // Cleanup existing
+        if (audioCtxRef.current) audioCtxRef.current.close().catch(() => {});
+        
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        const ctx = new AudioCtx();
+        const source = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        
+        audioCtxRef.current = ctx;
+        analyserRef.current = analyser;
+
+        const buffer = new Uint8Array(analyser.frequencyBinCount);
+        const update = () => {
+          if (!analyserRef.current) return;
+          analyserRef.current.getByteFrequencyData(buffer);
+          let sum = 0;
+          for (let i = 0; i < buffer.length; i++) sum += buffer[i];
+          const avg = sum / buffer.length;
+          setLevel(avg / 160); // higher sensitivity for visual effect
+          animationRef.current = requestAnimationFrame(update);
+        };
+        update();
+      } catch (err) {
+        console.warn("Tile volume detection failed:", err);
+      }
+    };
+
+    const timer = setTimeout(startDetection, 1000); // slight delay to ensure stream is ready
+    return () => {
+      clearTimeout(timer);
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+      if (audioCtxRef.current) audioCtxRef.current.close().catch(() => {});
+      analyserRef.current = null;
+    };
+  }, [participant.isMe, participant.socketId, localStream, streamsRef]);
+
 
   useEffect(() => {
     if (participant.videoOff) return;
@@ -168,11 +218,32 @@ function ParticipantTile({ participant, localStream, streamsRef, selectedOutput 
           position: 'absolute', inset: 0, background: '#202124',
           display: 'flex', alignItems: 'center', justifyContent: 'center'
         }}>
+          {/* Pulsing Rings */}
+          {level > 0.05 && (
+            <div style={{ position: 'absolute', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div style={{
+                position: 'absolute', width: 90, height: 90, borderRadius: '50%',
+                border: '2px solid #8ab4f8', opacity: 0.6,
+                transform: `scale(${1 + level * 0.5})`, transition: 'transform 0.1s ease-out'
+              }} />
+              <div style={{
+                position: 'absolute', width: 90, height: 90, borderRadius: '50%',
+                border: '1px solid #8ab4f8', opacity: 0.3,
+                transform: `scale(${1 + level * 1.2})`, transition: 'transform 0.12s ease-out'
+              }} />
+              <div style={{
+                position: 'absolute', width: 90, height: 90, borderRadius: '50%',
+                border: '1px solid #8ab4f8', opacity: 0.1,
+                transform: `scale(${1 + level * 2})`, transition: 'transform 0.15s ease-out'
+              }} />
+            </div>
+          )}
+
           {participant.avatar ? (
             <img
               src={`${SOCKET_URL}/${participant.avatar}`}
               alt={participant.name}
-              style={{ width: 90, height: 90, borderRadius: '50%', objectFit: 'cover', border: '3px solid #3c4043' }}
+              style={{ width: 90, height: 90, borderRadius: '50%', objectFit: 'cover', border: '3px solid #3c4043', zIndex: 2 }}
               onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
             />
           ) : null}
@@ -183,7 +254,8 @@ function ParticipantTile({ participant, localStream, streamsRef, selectedOutput 
             alignItems: 'center', justifyContent: 'center',
             fontSize: '32px', fontWeight: '700', color: 'white',
             border: '3px solid rgba(255,255,255,0.15)',
-            boxShadow: `0 0 0 6px ${(participant.color || '#4285f4')}33`
+            boxShadow: `0 0 0 6px ${(participant.color || '#4285f4')}33`,
+            zIndex: 2
           }}>
             {participant.initials}
           </div>
@@ -217,7 +289,7 @@ function ParticipantTile({ participant, localStream, streamsRef, selectedOutput 
           }}>
             {participant.name}{participant.isMe ? ' (You)' : ''}
           </span>
-          {participant.isMe && !participant.muted && participant.volume !== undefined && (
+          {!participant.videoOff && participant.isMe && !participant.muted && participant.volume !== undefined && (
             <div style={{
               width: '12px', height: '12px', borderRadius: '50%',
               background: participant.volume > 0.05 ? '#00c752' : 'rgba(255,255,255,0.2)',
@@ -496,8 +568,6 @@ export default function MeetingPage() {
         if (vTrack) vTrack.enabled = hasCam;
         if (aTrack) aTrack.enabled = hasMic;
         setLocalStream(stream);
-
-        if (aTrack) startVolumeDetection(stream);
 
         setParticipants(prev => prev.map(p =>
           p.isMe ? { ...p, videoOff: !hasCam || !vTrack } : p
