@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { SOCKET_URL } from '../config';
+import joinSound from '../assets/sounds/notification.mp3';
 
 /* ─── helpers ─────────────────────────────────────────── */
 const getInitials = (name = 'Guest') =>
@@ -208,13 +209,23 @@ function ParticipantTile({ participant, localStream, streamsRef, selectedOutput 
         position: 'absolute', bottom: 8, left: 8, right: 8,
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', zIndex: 5
       }}>
-        <span style={{
-          background: 'rgba(0,0,0,0.75)', color: 'white', fontSize: '12px',
-          padding: '3px 10px', borderRadius: '6px', backdropFilter: 'blur(6px)',
-          maxWidth: '70%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
-        }}>
-          {participant.name}{participant.isMe ? ' (You)' : ''}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', maxWidth: '70%' }}>
+          <span style={{
+            background: 'rgba(0,0,0,0.75)', color: 'white', fontSize: '12px',
+            padding: '3px 10px', borderRadius: '6px', backdropFilter: 'blur(6px)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
+          }}>
+            {participant.name}{participant.isMe ? ' (You)' : ''}
+          </span>
+          {participant.isMe && !participant.muted && participant.volume !== undefined && (
+            <div style={{
+              width: '12px', height: '12px', borderRadius: '50%',
+              background: participant.volume > 0.05 ? '#00c752' : 'rgba(255,255,255,0.2)',
+              boxShadow: participant.volume > 0.05 ? '0 0 10px #00c752' : 'none',
+              transition: 'all 0.1s'
+            }} title="Mic active" />
+          )}
+        </div>
         {participant.muted && (
           <div style={{
             background: 'rgba(234,67,53,0.9)', borderRadius: '6px',
@@ -306,6 +317,7 @@ export default function MeetingPage() {
   const [localStream, setLocalStream] = useState(null);
   const [copied, setCopied] = useState(false);
   const [socketError, setSocketError] = useState(null);
+  const [localVolume, setLocalVolume] = useState(0);
 
   // New states for screen share and private chat
   const [isScreenSharing, setIsScreenSharing] = useState(false);
@@ -324,11 +336,23 @@ export default function MeetingPage() {
 
   const socketRef = useRef(null);
   const localStreamRef = useRef(null);
+  const screenStreamRef = useRef(null);
   const peersRef = useRef({});
   const streamsRef = useRef({});
   const chatEndRef = useRef(null);
   const panelRef = useRef(panel);
-  const notificationRef = useRef(new Audio('https://assets.mixkit.co/active_storage/sfx/2358/2358-preview.mp3'));
+  const notificationRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+
+  useEffect(() => {
+    try {
+      notificationRef.current = new Audio(joinSound);
+      notificationRef.current.load();
+    } catch (err) {
+      console.warn("Failed to initialize notification sound:", err);
+    }
+  }, []);
   panelRef.current = panel;
 
   // Auto-scroll chat
@@ -400,9 +424,19 @@ export default function MeetingPage() {
 
     // ── Get local media (with retry for "Device in use") ──
     const tryGetMedia = async (attempts = 3, delayMs = 600) => {
+      const constraints = {
+        video: { width: 1280, height: 720, frameRate: 24 },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 48000
+        }
+      };
+      
       for (let i = 0; i < attempts; i++) {
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
           return stream;
         } catch (err) {
           console.warn(`Media attempt ${i + 1} failed:`, err.name);
@@ -411,10 +445,42 @@ export default function MeetingPage() {
       }
       // Try audio only as fallback
       try {
-        const audioOnly = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+        const audioOnly = await navigator.mediaDevices.getUserMedia({ 
+          video: false, 
+          audio: constraints.audio 
+        });
         return audioOnly;
       } catch (_) {
         return null;
+      }
+    };
+
+    const startVolumeDetection = (stream) => {
+      try {
+        if (!stream || !stream.getAudioTracks().length) return;
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        const audioContext = new AudioContextClass();
+        const source = audioContext.createMediaStreamSource(stream);
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        
+        audioContextRef.current = audioContext;
+        analyserRef.current = analyser;
+
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        const checkVolume = () => {
+          if (!analyserRef.current) return;
+          analyserRef.current.getByteFrequencyData(dataArray);
+          let sum = 0;
+          for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+          const avg = sum / dataArray.length;
+          setLocalVolume(avg / 128); // normalize 0-1
+          requestAnimationFrame(checkVolume);
+        };
+        checkVolume();
+      } catch (err) {
+        console.warn("Volume detection failed:", err);
       }
     };
 
@@ -430,6 +496,9 @@ export default function MeetingPage() {
         if (vTrack) vTrack.enabled = hasCam;
         if (aTrack) aTrack.enabled = hasMic;
         setLocalStream(stream);
+
+        if (aTrack) startVolumeDetection(stream);
+
         setParticipants(prev => prev.map(p =>
           p.isMe ? { ...p, videoOff: !hasCam || !vTrack } : p
         ));
@@ -493,7 +562,9 @@ export default function MeetingPage() {
     socket.on('incoming-join-request', (req) => {
       setJoinRequests(prev => [...prev, req]);
       // Play sound notification for host
-      notificationRef.current.play().catch(() => {});
+      if (notificationRef.current) {
+        notificationRef.current.play().catch(() => {});
+      }
     });
 
     socket.on('pending-requests-sync', ({ requests }) => {
@@ -553,7 +624,7 @@ export default function MeetingPage() {
           color: randomColor()
         }];
       });
-      createPeerConnection(participant.socketId, true);
+      createPeerConnection(participant.socketId, false);
     });
 
     // ── Participant left ──
@@ -573,7 +644,9 @@ export default function MeetingPage() {
         // If we're already handling something, we might want to ignore or rollback
         // For simple stability, we only process if stable or already handling an offer
         if (pc.signalingState !== "stable" && pc.signalingState !== "have-remote-offer") {
-          console.warn(`[WebRTC] Ignoring offer from ${fromSocketId} due to state: ${pc.signalingState}`);
+          // If we have a local offer (collision), we could rollback, but for now just log and ignore
+          // The newcomer will usually be the one whose offer is processed
+          console.warn(`[WebRTC] Collision detected: received offer from ${fromSocketId} while in state ${pc.signalingState}`);
           return;
         }
         
@@ -646,9 +719,12 @@ export default function MeetingPage() {
       };
 
       stopAllTracks(localStreamRef.current);
-      stopAllTracks(screenStream); // Ensure screen share stops too
+      stopAllTracks(screenStreamRef.current); // Ensure screen share stops too
       
-      localStreamRef.current = null;
+      if (audioContextRef.current) {
+        audioContextRef.current.close().catch(() => {});
+      }
+      analyserRef.current = null;
       
       // Clear video sources
       const videos = document.querySelectorAll('video');
@@ -657,10 +733,9 @@ export default function MeetingPage() {
         v.load();
       });
 
-      Object.values(peersRef.current).forEach(pc => pc.close());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [meetingCode, screenStream]); // Include screenStream in deps to ensure cleanup has access to latest ref
+  }, [meetingCode]); // Remove screenStream from deps to avoid reconnects
 
   // ── Controls ────────────────────────────────────────
   const toggleMic = () => {
@@ -696,18 +771,24 @@ export default function MeetingPage() {
   };
 
   const stopScreenShare = useCallback(() => {
-    if (screenStream) {
-      screenStream.getTracks().forEach(t => t.stop());
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(t => t.stop());
     }
+    screenStreamRef.current = null;
     setScreenStream(null);
     setIsScreenSharing(false);
 
     // Revert to camera track
     const camVideoTrack = localStreamRef.current?.getVideoTracks()[0];
     Object.values(peersRef.current).forEach(pc => {
+      if (pc.signalingState === 'closed') return;
       const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
       if (sender && camVideoTrack) {
-        sender.replaceTrack(camVideoTrack).catch(err => console.error("Error reverting track:", err));
+        sender.replaceTrack(camVideoTrack).catch(err => {
+          if (pc.signalingState !== 'closed') {
+            console.error("Error reverting track:", err);
+          }
+        });
       }
     });
 
@@ -725,6 +806,7 @@ export default function MeetingPage() {
     }
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      screenStreamRef.current = stream;
       setScreenStream(stream);
       setIsScreenSharing(true);
 
@@ -737,9 +819,14 @@ export default function MeetingPage() {
 
       // Replace video track for all existing peers
       Object.values(peersRef.current).forEach(pc => {
+        if (pc.signalingState === 'closed') return;
         const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
         if (sender && screenVideoTrack) {
-          sender.replaceTrack(screenVideoTrack).catch(err => console.error("Error replacing track:", err));
+          sender.replaceTrack(screenVideoTrack).catch(err => {
+            if (pc.signalingState !== 'closed') {
+              console.error("Error replacing track:", err);
+            }
+          });
         }
       });
 
@@ -747,7 +834,13 @@ export default function MeetingPage() {
       setParticipants(prev => prev.map(p => p.isMe ? { ...p, videoOff: false } : p));
       setLocalStream(stream); // Temporary override of the local tile video stream
     } catch (err) {
-      console.error('Error sharing screen:', err);
+      if (err.name === 'NotAllowedError') {
+        console.warn('Screen sharing permission denied by user');
+      } else {
+        console.error('Error sharing screen:', err);
+      }
+      setIsScreenSharing(false);
+      setScreenStream(null);
     }
   };
 
@@ -935,7 +1028,10 @@ export default function MeetingPage() {
               {participants.map(p => (
                 <ParticipantTile
                   key={p.socketId || 'local-me'}
-                  participant={p}
+                  participant={{
+                    ...p,
+                    volume: p.isMe ? localVolume : undefined
+                  }}
                   localStream={localStream}
                   streamsRef={streamsRef}
                   selectedOutput={selectedOutput}
