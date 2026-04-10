@@ -187,22 +187,24 @@ function ParticipantTile({ participant, localStream, streamsRef, selectedOutput 
     const attach = () => {
       if (!videoRef.current) return;
       if (participant.isMe) {
-        if (localStream) videoRef.current.srcObject = localStream;
+        if (localStream && videoRef.current.srcObject !== localStream) {
+          videoRef.current.srcObject = localStream;
+        }
       } else {
         const stream = streamsRef.current[participant.socketId];
-        if (stream) {
+        if (stream && videoRef.current.srcObject !== stream) {
           videoRef.current.srcObject = stream;
           // Apply audio output if supported
           if (videoRef.current.setSinkId && selectedOutput) {
-            videoRef.current.setSinkId(selectedOutput).catch(e => console.error("Error setting sinkId for remote track:", e));
+            videoRef.current.setSinkId(selectedOutput).catch(e => console.error("Error setting sinkId:", e));
           }
         }
       }
     };
 
-    const t = setTimeout(attach, 80);
-    return () => clearTimeout(t);
-  }, [participant.isMe, participant.socketId, participant.videoOff, localStream, selectedOutput]);
+    const t = setInterval(attach, 500); // Periodic check for the stream
+    return () => clearInterval(t);
+  }, [participant.isMe, participant.socketId, participant.videoOff, localStream, selectedOutput, streamsRef]);
 
   return (
     <div style={{
@@ -416,6 +418,18 @@ export default function MeetingPage() {
   const notificationRef = useRef(null);
   const audioContextRef = useRef(null);
   const analyserRef = useRef(null);
+  const candidatesQueue = useRef({}); // socketId -> [RTCIceCandidate]
+
+  const processQueuedCandidates = (socketId) => {
+    const pc = peersRef.current[socketId];
+    if (pc && pc.remoteDescription && candidatesQueue.current[socketId]) {
+      console.log(`[WebRTC] Processing ${candidatesQueue.current[socketId].length} queued candidates for ${socketId}`);
+      candidatesQueue.current[socketId].forEach(candidate => {
+        pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.warn("[WebRTC] ICE candidates error:", e));
+      });
+      delete candidatesQueue.current[socketId];
+    }
+  };
 
   useEffect(() => {
     try {
@@ -472,6 +486,7 @@ export default function MeetingPage() {
       pc.onnegotiationneeded = async () => {
         try {
           if (pc.signalingState !== 'stable') return;
+          console.log(`[WebRTC] Creating offer for: ${targetSocketId}`);
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
           socketRef.current?.emit('offer', { offer, targetSocketId, meetingId: meetingCode });
@@ -480,6 +495,13 @@ export default function MeetingPage() {
         }
       };
     }
+
+    pc.oniceconnectionstatechange = () => {
+      console.log(`[WebRTC] PC with ${targetSocketId} connection state: ${pc.iceConnectionState}`);
+      if (pc.iceConnectionState === 'failed') {
+        pc.restartIce();
+      }
+    };
 
     return pc;
   }, [meetingCode]);
@@ -711,19 +733,25 @@ export default function MeetingPage() {
     socket.on('offer', async ({ offer, fromSocketId }) => {
       try {
         const pc = createPeerConnection(fromSocketId, false);
-        // If we're already handling something, we might want to ignore or rollback
-        // For simple stability, we only process if stable or already handling an offer
-        if (pc.signalingState !== "stable" && pc.signalingState !== "have-remote-offer") {
-          // If we have a local offer (collision), we could rollback, but for now just log and ignore
-          // The newcomer will usually be the one whose offer is processed
-          console.warn(`[WebRTC] Collision detected: received offer from ${fromSocketId} while in state ${pc.signalingState}`);
-          return;
+        
+        // Handle collision (Perfect Negotiation lite)
+        if (pc.signalingState !== "stable") {
+          console.warn(`[WebRTC] Signaling collision at ${fromSocketId}, state: ${pc.signalingState}`);
+          // For simplicity, we assume the server ensures only one offer wins or we rollback
+          // Let's implement a simple skip if already in progress
+          if (pc.signalingState === "have-local-offer") {
+             // In conflict, the one with higher socketId could win, or just return.
+             // Here we just return and let initiator re-negotiate.
+             return;
+          }
         }
         
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         socket.emit('answer', { answer, targetSocketId: fromSocketId, meetingId: meetingCode });
+        
+        processQueuedCandidates(fromSocketId);
       } catch (err) {
         console.error('Error handling offer:', err);
       }
@@ -732,24 +760,28 @@ export default function MeetingPage() {
     socket.on('answer', async ({ answer, fromSocketId }) => {
       try {
         const pc = peersRef.current[fromSocketId];
-        if (pc && pc.signalingState === "have-local-offer") {
-          await pc.setRemoteDescription(new RTCSessionDescription(answer));
-        } else if (pc) {
-          console.warn(`[WebRTC] Ignoring answer from ${fromSocketId} due to state: ${pc.signalingState}`);
+        if (pc) {
+          if (pc.signalingState === "have-local-offer") {
+            await pc.setRemoteDescription(new RTCSessionDescription(answer));
+            processQueuedCandidates(fromSocketId);
+          }
         }
       } catch (err) {
         console.error('Error handling answer:', err);
       }
     });
 
-    socket.on('ice-candidate', ({ candidate, fromSocketId }) => {
+    socket.on('ice-candidate', async ({ candidate, fromSocketId }) => {
       try {
         const pc = peersRef.current[fromSocketId];
-        if (pc && candidate && pc.remoteDescription) {
-          pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+        if (pc && pc.remoteDescription) {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+        } else {
+          if (!candidatesQueue.current[fromSocketId]) candidatesQueue.current[fromSocketId] = [];
+          candidatesQueue.current[fromSocketId].push(candidate);
         }
       } catch (err) {
-        console.error('Error handling ice-candidate:', err);
+        console.error('Error handling ICE candidate:', err);
       }
     });
 
@@ -975,7 +1007,17 @@ export default function MeetingPage() {
     <div style={{ height: '100vh', background: '#202124', display: 'flex', flexDirection: 'column', overflow: 'hidden', fontFamily: "'Google Sans', Roboto, sans-serif" }}>
 
       {/* ── Top Bar ── */}
-      <div style={{
+      <style>{`
+        @media (max-width: 600px) {
+          .meeting-top-bar { padding: 8px 12px !important; }
+          .meeting-bottom-bar { padding: 12px !important; }
+          .meeting-controls { gap: 6px !important; }
+          .control-btn-large { width: 44px !important; height: 44px !important; }
+          .leave-btn { padding: 10px 16px !important; }
+          .meeting-side-panel { width: 100% !important; position: absolute; inset: 0; z-index: 1000; }
+        }
+      `}</style>
+      <div className="meeting-top-bar" style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '12px 20px', position: 'absolute', top: 0, left: 0, right: 0, zIndex: 20
       }}>
@@ -1131,7 +1173,7 @@ export default function MeetingPage() {
 
         {/* ── Side Panel ── */}
         {panel && (
-          <div style={{
+          <div className="meeting-side-panel" style={{
             width: 340, background: '#2d2e30', borderLeft: '1px solid #3c4043',
             display: 'flex', flexDirection: 'column', transition: 'all 0.3s'
           }}>
@@ -1270,7 +1312,7 @@ export default function MeetingPage() {
       </div>
 
       {/* ── Bottom Toolbar ── */}
-      <div style={{
+      <div className="meeting-bottom-bar" style={{
         position: 'absolute', bottom: 0, left: 0, right: 0,
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '12px 28px 20px',
@@ -1283,7 +1325,7 @@ export default function MeetingPage() {
         </div>
 
         {/* Center: controls */}
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+        <div className="meeting-controls" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
           <ControlBtn
             active={micOn} activeColor="#3c4043" inactiveColor="#ea4335"
             icon={micOn ? <Mic size={22} /> : <MicOff size={22} />}

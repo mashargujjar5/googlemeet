@@ -103,7 +103,11 @@ export default function ProfilePage() {
           </div>
         )}
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '24px' }}>
+        <div style={{ 
+          display: 'grid', 
+          gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', 
+          gap: '24px' 
+        }}>
           
           {/* Edit Profile Section */}
           <div style={{

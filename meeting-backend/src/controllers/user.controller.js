@@ -66,3 +66,48 @@ exports.logout = async (req, res) => {
 exports.getProfile = async (req, res) => {
   res.status(200).json({ success: true, data: req.user });
 };
+
+exports.updateAccountDetails = async (req, res) => {
+  try {
+    const { fullname } = req.body;
+    const updateData = {};
+    if (fullname) updateData.fullname = fullname;
+    
+    if (req.files?.avatar) {
+      updateData.avatar = req.files.avatar[0].path;
+    }
+    
+    if (req.files?.coverImage) {
+      updateData.coverImage = req.files.coverImage[0].path;
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user?._id,
+      { $set: updateData },
+      { new: true }
+    ).select("-password -refreshToken");
+
+    return res.status(200).json({ success: true, data: user });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.changeCurrentPassword = async (req, res) => {
+  try {
+    const { oldPassword, newPassword } = req.body;
+    const user = await User.findById(req.user?._id);
+    const isPasswordCorrect = await user.isPasswordCorrect(oldPassword);
+
+    if (!isPasswordCorrect) {
+      return res.status(400).json({ success: false, message: "Invalid old password" });
+    }
+
+    user.password = newPassword;
+    await user.save({ validateBeforeSave: false });
+
+    return res.status(200).json({ success: true, message: "Password changed successfully" });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};

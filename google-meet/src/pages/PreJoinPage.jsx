@@ -126,9 +126,17 @@ export default function PreJoinPage() {
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       padding: '24px', paddingTop: '88px'
     }}>
-      <div style={{
+      <style>{`
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @media (max-width: 850px) {
+          .prejoin-container { flex-direction: column !important; align-items: center !important; }
+          .prejoin-panel { max-width: 560px !important; width: 100% !important; margin-top: 20px; }
+        }
+      `}</style>
+      <div className="prejoin-container" style={{
         display: 'flex', gap: '40px', alignItems: 'flex-start',
-        maxWidth: '960px', width: '100%', flexWrap: 'wrap', justifyContent: 'center'
+        maxWidth: '1000px', width: '100%', flexWrap: 'wrap', justifyContent: 'center',
+        animation: 'fadeIn 0.5s ease-out'
       }}>
 
         {/* Camera Preview */}
@@ -274,9 +282,11 @@ export default function PreJoinPage() {
         </div>
 
         {/* Join Panel */}
-        <div style={{
-          flex: '1', minWidth: '280px', maxWidth: '360px',
-          display: 'flex', flexDirection: 'column', gap: '20px'
+        <div className="prejoin-panel" style={{
+          flex: '1', minWidth: '300px', maxWidth: '380px',
+          display: 'flex', flexDirection: 'column', gap: '24px',
+          background: 'rgba(255,255,255,0.02)', padding: '32px',
+          borderRadius: '24px', border: '1px solid rgba(255,255,255,0.05)'
         }}>
           {error && (
             <div style={{

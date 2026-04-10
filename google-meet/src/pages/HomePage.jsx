@@ -91,23 +91,32 @@ export default function HomePage() {
         </div>
       )}
 
+      <style>{`
+        @media (max-width: 650px) {
+          .hero-h1 { fontSize: 32px !important; }
+          .hero-p { fontSize: 15px !important; }
+          .action-buttons { flex-direction: column !important; align-items: stretch !important; gap: 12px !important; }
+          .join-input-container { min-width: 100% !important; }
+          .upcoming-item { padding: 12px !important; }
+        }
+      `}</style>
       {/* Hero Section */}
       <div style={{
         maxWidth: '900px', margin: '0 auto', padding: '60px 24px 40px',
         display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center'
       }}>
-        <h1 style={{
+        <h1 className="hero-h1" style={{
           fontSize: '48px', fontWeight: '400', color: '#e8eaed',
           lineHeight: '1.2', marginBottom: '16px', letterSpacing: '-1px'
         }}>
           Video calls and meetings for everyone
         </h1>
-        <p style={{ fontSize: '18px', color: '#9aa0a6', marginBottom: '40px', maxWidth: '560px' }}>
+        <p className="hero-p" style={{ fontSize: '18px', color: '#9aa0a6', marginBottom: '40px', maxWidth: '560px' }}>
           Connect, collaborate, and celebrate from anywhere with Google Meet
         </p>
 
         {/* Action Buttons */}
-        <div style={{ display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center', marginBottom: '40px' }}>
+        <div className="action-buttons" style={{ display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center', marginBottom: '40px' }}>
           {/* New Meeting Button */}
           <div style={{ position: 'relative' }}>
             <button
@@ -160,12 +169,12 @@ export default function HomePage() {
           </div>
 
           {/* Join Input */}
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            <div style={{
+          <div className="action-buttons" style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <div className="join-input-container" style={{
               display: 'flex', alignItems: 'center', gap: '10px',
               background: '#2d2e30', border: '1px solid #444746',
               borderRadius: '10px', padding: '0 16px', height: '48px',
-              transition: 'border-color 0.2s', minWidth: '220px'
+              transition: 'border-color 0.2s', minWidth: '220px', flex: 1
             }}>
               <Users size={18} style={{ color: '#9aa0a6', flexShrink: 0 }} />
               <input
@@ -209,6 +218,7 @@ export default function HomePage() {
             {meetingsToShow.map((meeting, i) => (
               <div
                 key={i}
+                className="upcoming-item"
                 style={{
                   display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                   background: '#2d2e30', borderRadius: '12px', padding: '16px 20px',

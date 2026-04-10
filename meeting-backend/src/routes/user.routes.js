@@ -15,4 +15,12 @@ router.post('/login', login);
 router.post('/logout', verifyJWT, logout);
 router.get('/profile', verifyJWT, getProfile);
 
+// Update routes
+router.put('/profile', verifyJWT, upload.fields([
+  { name: 'avatar', maxCount: 1 },
+  { name: 'coverImage', maxCount: 1 }
+]), require('../controllers/user.controller').updateAccountDetails);
+
+router.put('/change-password', verifyJWT, require('../controllers/user.controller').changeCurrentPassword);
+
 module.exports = router;
